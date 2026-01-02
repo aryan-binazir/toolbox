@@ -1,11 +1,12 @@
-# scripts
+# toolbox
 
-Utility scripts for occasional use.
+Personal collection of scripts and utilities. Various languages, zero polish, works-for-me quality.
 
 ## media-scripts
 
-Go tools for file/directory management:
+Python scripts for file/directory management (run with `uv run`):
 
-- `consolidatefiles` – flatten nested files into one directory
-- `deleteemptydirs` – remove empty directories
-- `splitdir` – split large directories into smaller chunks
+- `consolidate_files` – flatten nested files into one directory
+- `delete_empty_dirs` – remove empty directories
+- `delete_moved_files` – delete files from source that already exist in destination (by hash comparison)
+- `split_dir` – split large directories into smaller chunks
