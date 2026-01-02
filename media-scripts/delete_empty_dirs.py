@@ -22,10 +22,16 @@ app = typer.Typer(
 @app.command()
 def main(
     root: Path = typer.Option(
-        Path("."), "--root", "-r", help="Root directory to scan for empty subdirectories"
+        Path("."),
+        "--root",
+        "-r",
+        help="Root directory to scan for empty subdirectories",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", "-n", help="Preview changes without deleting any directories"
+        False,
+        "--dry-run",
+        "-n",
+        help="Preview changes without deleting any directories",
     ),
 ) -> None:
     """

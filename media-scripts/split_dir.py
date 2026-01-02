@@ -97,7 +97,10 @@ def move_file(src: Path, dest: Path) -> None:
 def main(
     directory: Path = typer.Argument(..., help="Directory containing files to split"),
     split_size: str = typer.Option(
-        "8GB", "--split-size", "-s", help="Size limit per subdirectory (e.g., 8GB, 500MB, 1TB)"
+        "8GB",
+        "--split-size",
+        "-s",
+        help="Size limit per subdirectory (e.g., 8GB, 500MB, 1TB)",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", "-n", help="Preview changes without moving files"
@@ -127,7 +130,9 @@ def main(
 
     start_num = find_max_numbered_dir(directory)
     if start_num > 0:
-        print(f"Found existing numbered directories up to {start_num}/, starting from {start_num + 1}/\n")
+        print(
+            f"Found existing numbered directories up to {start_num}/, starting from {start_num + 1}/\n"
+        )
 
     files: list[tuple[str, int]] = []
     for entry in directory.iterdir():
@@ -145,7 +150,9 @@ def main(
 
     for name, size in files:
         if size > max_size:
-            print(f"Warning: {name} exceeds {format_size(max_size)} ({format_size(size)}), placing in its own directory")
+            print(
+                f"Warning: {name} exceeds {format_size(max_size)} ({format_size(size)}), placing in its own directory"
+            )
             batches.append([(name, size)])
             batch_sizes.append(size)
             continue
@@ -162,7 +169,9 @@ def main(
             batches.append([(name, size)])
             batch_sizes.append(size)
 
-    print(f"Splitting {len(files)} files into {len(batches)} directories (max {format_size(max_size)} each)\n")
+    print(
+        f"Splitting {len(files)} files into {len(batches)} directories (max {format_size(max_size)} each)\n"
+    )
 
     operations: list[tuple[Path, Path, str]] = []
 
@@ -171,7 +180,9 @@ def main(
         dir_path = directory / dir_name
 
         if dry_run:
-            print(f"Directory {dir_name}: {len(batch)} files ({format_size(batch_sizes[i])})")
+            print(
+                f"Directory {dir_name}: {len(batch)} files ({format_size(batch_sizes[i])})"
+            )
             for name, _ in batch:
                 print(f"  {name}")
 
@@ -198,7 +209,10 @@ def main(
         except Exception as e:
             print(f"\nFAILED: {src} -> {dest}", file=sys.stderr)
             print(f"Error: {e}", file=sys.stderr)
-            print(f"\nStopping. {completed}/{len(operations)} files moved.", file=sys.stderr)
+            print(
+                f"\nStopping. {completed}/{len(operations)} files moved.",
+                file=sys.stderr,
+            )
             print("Re-run to continue with remaining files.", file=sys.stderr)
             raise typer.Exit(1)
 

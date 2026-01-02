@@ -133,7 +133,9 @@ def move_file(src: Path, dest: Path, verify: bool) -> None:
 @app.command()
 def main(
     target_dir: Path = typer.Argument(..., help="Target directory to move files into"),
-    source_dirs: list[Path] = typer.Argument(..., help="Source directories to consolidate"),
+    source_dirs: list[Path] = typer.Argument(
+        ..., help="Source directories to consolidate"
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", "-n", help="Preview changes without moving any files"
     ),
@@ -187,7 +189,9 @@ def main(
             suffix = " (renamed)" if renamed else ""
             print(f"Would move: {src} -> {dest}{suffix}")
         plural = "s" if len(operations) != 1 else ""
-        print(f"\n{len(operations)} file{plural} would be moved ({renamed_count} renamed to avoid duplicates)")
+        print(
+            f"\n{len(operations)} file{plural} would be moved ({renamed_count} renamed to avoid duplicates)"
+        )
         raise typer.Exit(0)
 
     if verify:
@@ -200,8 +204,13 @@ def main(
         except Exception as e:
             print(f"\nFAILED: {src} -> {dest}", file=sys.stderr)
             print(f"Error: {e}", file=sys.stderr)
-            print(f"\nStopping. {completed}/{len(operations)} files moved successfully.", file=sys.stderr)
-            print("Re-run the script to continue with remaining files.", file=sys.stderr)
+            print(
+                f"\nStopping. {completed}/{len(operations)} files moved successfully.",
+                file=sys.stderr,
+            )
+            print(
+                "Re-run the script to continue with remaining files.", file=sys.stderr
+            )
             raise typer.Exit(1)
 
         suffix = " (renamed)" if renamed else ""
@@ -209,7 +218,9 @@ def main(
         completed += 1
 
     plural = "s" if completed != 1 else ""
-    print(f"\n{completed} file{plural} moved ({renamed_count} renamed to avoid duplicates)")
+    print(
+        f"\n{completed} file{plural} moved ({renamed_count} renamed to avoid duplicates)"
+    )
 
 
 if __name__ == "__main__":
