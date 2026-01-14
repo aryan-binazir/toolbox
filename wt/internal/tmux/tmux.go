@@ -47,7 +47,8 @@ func ListSessions() ([]Session, error) {
 		stderrStr := stderr.String()
 		// Handle expected "no sessions" conditions
 		if strings.Contains(stderrStr, "no server running") ||
-			strings.Contains(stderrStr, "no sessions") {
+			strings.Contains(stderrStr, "no sessions") ||
+			strings.Contains(stderrStr, "error connecting to") {
 			return []Session{}, nil
 		}
 		if stderrStr != "" {
