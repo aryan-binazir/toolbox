@@ -38,7 +38,7 @@ func ListSessions() ([]Session, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}:#{session_attached}:#{session_windows}")
+	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{session_windows}")
 	out, err := cmd.Output()
 	if err != nil {
 		if strings.Contains(err.Error(), "no server running") {
@@ -48,7 +48,7 @@ func ListSessions() ([]Session, error) {
 		if ok && strings.Contains(string(exitErr.Stderr), "no server running") {
 			return []Session{}, nil
 		}
-		return []Session{}, nil
+		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
 
 	var sessions []Session
@@ -57,7 +57,7 @@ func ListSessions() ([]Session, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, ":")
+		parts := strings.Split(line, "\t")
 		if len(parts) >= 3 {
 			sessions = append(sessions, Session{
 				Name:     parts[0],

@@ -83,11 +83,10 @@ func CreateWorktree(name, basePath, branch string) (string, error) {
 	args := []string{"worktree", "add"}
 	if branch != "" {
 		args = append(args, "-b", branch)
-	}
-	args = append(args, worktreePath)
-	if branch == "" {
+	} else {
 		args = append(args, "-b", name)
 	}
+	args = append(args, worktreePath)
 
 	cmd := exec.Command("git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
