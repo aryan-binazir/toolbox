@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -39,14 +40,18 @@ func ListSessions() ([]Session, error) {
 	}
 
 	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{session_windows}")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		if strings.Contains(err.Error(), "no server running") {
+		stderrStr := stderr.String()
+		// Handle expected "no sessions" conditions
+		if strings.Contains(stderrStr, "no server running") ||
+			strings.Contains(stderrStr, "no sessions") {
 			return []Session{}, nil
 		}
-		exitErr, ok := err.(*exec.ExitError)
-		if ok && strings.Contains(string(exitErr.Stderr), "no server running") {
-			return []Session{}, nil
+		if stderrStr != "" {
+			return nil, fmt.Errorf("failed to list sessions: %s", strings.TrimSpace(stderrStr))
 		}
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
