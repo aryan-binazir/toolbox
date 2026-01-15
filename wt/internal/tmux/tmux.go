@@ -19,6 +19,11 @@ var (
 	ErrInvalidName     = errors.New("invalid session name")
 )
 
+// exactTarget returns a tmux target string that matches exactly (no prefix matching)
+func exactTarget(name string) string {
+	return "=" + name
+}
+
 type Session struct {
 	Name      string
 	Attached  bool
@@ -76,7 +81,7 @@ func ListSessions() ([]Session, error) {
 }
 
 func SessionExists(name string) bool {
-	cmd := exec.Command("tmux", "has-session", "-t", name)
+	cmd := exec.Command("tmux", "has-session", "-t", exactTarget(name))
 	return cmd.Run() == nil
 }
 
@@ -110,7 +115,7 @@ func KillSession(name string) error {
 		return ErrSessionNotFound
 	}
 
-	cmd := exec.Command("tmux", "kill-session", "-t", name)
+	cmd := exec.Command("tmux", "kill-session", "-t", exactTarget(name))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to kill session: %s", strings.TrimSpace(string(out)))
 	}
@@ -127,7 +132,7 @@ func AttachSession(name string) error {
 		return ErrSessionNotFound
 	}
 
-	cmd := exec.Command("tmux", "attach-session", "-t", name)
+	cmd := exec.Command("tmux", "attach-session", "-t", exactTarget(name))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -145,7 +150,7 @@ func SwitchToSession(name string) error {
 	}
 
 	if os.Getenv("TMUX") != "" {
-		cmd := exec.Command("tmux", "switch-client", "-t", name)
+		cmd := exec.Command("tmux", "switch-client", "-t", exactTarget(name))
 		return cmd.Run()
 	}
 
@@ -172,7 +177,7 @@ func GetCurrentSession() (string, error) {
 
 func WindowExists(session, window string) bool {
 	target := fmt.Sprintf("%s:%s", session, window)
-	cmd := exec.Command("tmux", "has-session", "-t", target)
+	cmd := exec.Command("tmux", "has-session", "-t", exactTarget(target))
 	return cmd.Run() == nil
 }
 
@@ -207,7 +212,7 @@ func KillWindow(session, name string) error {
 		return ErrWindowNotFound
 	}
 
-	cmd := exec.Command("tmux", "kill-window", "-t", target)
+	cmd := exec.Command("tmux", "kill-window", "-t", exactTarget(target))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to kill window: %s", strings.TrimSpace(string(out)))
 	}
@@ -223,11 +228,11 @@ func SwitchToWindow(session, name string) error {
 	target := fmt.Sprintf("%s:%s", session, name)
 
 	if IsInsideTmux() {
-		cmd := exec.Command("tmux", "select-window", "-t", target)
+		cmd := exec.Command("tmux", "select-window", "-t", exactTarget(target))
 		return cmd.Run()
 	}
 
-	cmd := exec.Command("tmux", "attach-session", "-t", target)
+	cmd := exec.Command("tmux", "attach-session", "-t", exactTarget(target))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

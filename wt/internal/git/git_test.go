@@ -197,13 +197,21 @@ func TestWorktreeExists(t *testing.T) {
 	tmpDir, cleanup := setupTestRepo(t)
 	defer cleanup()
 
-	if WorktreeExists("nonexistent", tmpDir) {
+	exists, err := WorktreeExists("nonexistent", tmpDir)
+	if err != nil {
+		t.Fatalf("WorktreeExists() error = %v", err)
+	}
+	if exists {
 		t.Error("WorktreeExists() = true for nonexistent worktree")
 	}
 
 	CreateWorktree("exists-test", tmpDir, "")
 
-	if !WorktreeExists("exists-test", tmpDir) {
+	exists, err = WorktreeExists("exists-test", tmpDir)
+	if err != nil {
+		t.Fatalf("WorktreeExists() error = %v", err)
+	}
+	if !exists {
 		t.Error("WorktreeExists() = false for existing worktree")
 	}
 }

@@ -57,7 +57,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if git.WorktreeExists(name, basePath) {
+	exists, err := git.WorktreeExists(name, basePath)
+	if err != nil {
+		return fmt.Errorf("failed to check worktree: %w", err)
+	}
+	if exists {
 		return fmt.Errorf("worktree '%s' already exists", name)
 	}
 
@@ -81,7 +85,9 @@ func createAsSession(name, basePath string) error {
 
 	fmt.Printf("Creating tmux session '%s'...\n", name)
 	if err := tmux.CreateSession(name, worktreePath); err != nil {
-		git.RemoveWorktree(worktreePath, true)
+		if cleanupErr := git.RemoveWorktree(worktreePath, true); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clean up worktree at %s: %v\n", worktreePath, cleanupErr)
+		}
 		return fmt.Errorf("failed to create tmux session: %w", err)
 	}
 
@@ -118,7 +124,9 @@ func createAsWindow(name, basePath string) error {
 
 	fmt.Printf("Creating tmux window '%s' in session '%s'...\n", name, session)
 	if err := tmux.CreateWindow(session, name, worktreePath); err != nil {
-		git.RemoveWorktree(worktreePath, true)
+		if cleanupErr := git.RemoveWorktree(worktreePath, true); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clean up worktree at %s: %v\n", worktreePath, cleanupErr)
+		}
 		return fmt.Errorf("failed to create tmux window: %w", err)
 	}
 

@@ -117,19 +117,19 @@ func RemoveWorktree(path string, force bool) error {
 	return nil
 }
 
-func WorktreeExists(name, basePath string) bool {
+func WorktreeExists(name, basePath string) (bool, error) {
 	worktrees, err := ListWorktrees()
 	if err != nil {
-		return false
+		return false, err
 	}
 
 	targetPath := filepath.Join(basePath, name)
 	for _, wt := range worktrees {
-		if wt.Path == targetPath || wt.Name == name {
-			return true
+		if wt.Path == targetPath {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func GetWorktreePath(name, basePath string) (string, error) {
@@ -140,7 +140,7 @@ func GetWorktreePath(name, basePath string) (string, error) {
 
 	targetPath := filepath.Join(basePath, name)
 	for _, wt := range worktrees {
-		if wt.Path == targetPath || wt.Name == name {
+		if wt.Path == targetPath {
 			return wt.Path, nil
 		}
 	}
