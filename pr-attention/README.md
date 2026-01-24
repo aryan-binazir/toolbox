@@ -95,15 +95,15 @@ Notifications: 1
 Duration:      245ms
 
 === Attention Queue ===
-REPO          #    TITLE                     STATUS            SINCE  ACKED
-org/repo      42   Add new feature           review_requested  2d     no
-org/repo      43   Fix critical bug          both              1h     yes
-other/lib     17   Update dependencies       assigned          30m    no
+REPO          #    TITLE                     STATUS            SINCE
+org/repo      42   Add new feature           review_requested  2d
+org/repo      43   Fix critical bug          both              1h
+other/lib     17   Update dependencies       assigned          30m
 ```
 
-### Acknowledge a PR
+### Silence a PR
 
-Suppress notifications for a PR until it's updated:
+Manually suppress notifications for a PR until it's updated:
 
 ```bash
 # By URL
@@ -189,16 +189,16 @@ crontab -e
 
 A notification is sent when:
 
-- A PR is newly added to your attention queue
-- A previously-seen PR has been updated since you last saw it
-- The PR is not currently acknowledged
+- A PR is **new** (first time in your attention queue)
+- A PR was **updated** (GitHub's `updatedAt` changed since last notification)
 
 A notification is NOT sent when:
 
 - The PR was already notified and hasn't changed
-- The PR is acknowledged (acked until next update)
 - The PR is a draft (unless `--include-drafts`)
 - The PR has an ignored label or author
+
+Use `pr-attention ack` to manually silence a noisy PR until it's updated.
 
 ### Backoff
 
@@ -214,7 +214,7 @@ If GitHub API calls fail, the tool uses exponential backoff:
 
 SQLite database at `~/.local/share/pr-attention/state.db` stores:
 
-- PR tracking (first seen, last seen, last updated, ack state)
+- PR tracking (first seen, last seen, last updated, last notified)
 - Run history (timing, counts, errors)
 - Backoff state
 

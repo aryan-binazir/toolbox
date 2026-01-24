@@ -17,6 +17,19 @@ wt delete feature-login -y
 
 See [wt/README.md](wt/README.md) for full documentation.
 
+## pr-attention
+
+Go CLI that polls GitHub for PRs where you're a reviewer or assignee, sends desktop notifications, and tracks state to avoid repeated alerts.
+
+```bash
+pr-attention run                    # poll and notify
+pr-attention status                 # show attention queue
+pr-attention ack org/repo#42        # silence until updated
+pr-attention clear                  # reset state
+```
+
+Supports scheduling via launchd (macOS), systemd timer (Linux), or cron. See [pr-attention/README.md](pr-attention/README.md) for full documentation.
+
 ## media-scripts
 
 Python scripts for file/directory management (run with `uv run`):
