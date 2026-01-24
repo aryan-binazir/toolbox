@@ -1,0 +1,3 @@
+# PR Attention - Run every 10 minutes
+# Add to your crontab with: crontab -e
+*/10 * * * * /usr/local/bin/pr-attention run --quiet >> /tmp/pr-attention.log 2>> /tmp/pr-attention.err

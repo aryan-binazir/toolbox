@@ -1,0 +1,8 @@
+{
+  "review_requested_single": [{"id": "PR_abc123", "url": "https://github.com/org/repo/pull/42", "title": "Add feature", "number": 42, "repository": {"nameWithOwner": "org/repo"}, "updatedAt": "2024-01-15T10:00:00Z", "isDraft": false, "labels": [], "author": {"login": "dev1"}}],
+  "assigned_single": [{"id": "PR_def456", "url": "https://github.com/org/repo/pull/43", "title": "Fix bug", "number": 43, "repository": {"nameWithOwner": "org/repo"}, "updatedAt": "2024-01-15T11:00:00Z", "isDraft": false, "labels": [], "author": {"login": "dev2"}}],
+  "assigned_overlapping": [{"id": "PR_abc123", "url": "https://github.com/org/repo/pull/42", "title": "Add feature", "number": 42, "repository": {"nameWithOwner": "org/repo"}, "updatedAt": "2024-01-15T10:00:00Z", "isDraft": false, "labels": [], "author": {"login": "dev1"}}],
+  "draft_pr": [{"id": "PR_draft", "url": "https://github.com/org/repo/pull/44", "title": "WIP", "number": 44, "repository": {"nameWithOwner": "org/repo"}, "updatedAt": "2024-01-15T12:00:00Z", "isDraft": true, "labels": [], "author": {"login": "dev1"}}],
+  "labeled_wip": [{"id": "PR_wip", "url": "https://github.com/org/repo/pull/45", "title": "Work in progress", "number": 45, "repository": {"nameWithOwner": "org/repo"}, "updatedAt": "2024-01-15T12:00:00Z", "isDraft": false, "labels": [{"name": "WIP"}], "author": {"login": "dev1"}}],
+  "bot_author": [{"id": "PR_bot", "url": "https://github.com/org/repo/pull/46", "title": "Bump deps", "number": 46, "repository": {"nameWithOwner": "org/repo"}, "updatedAt": "2024-01-15T12:00:00Z", "isDraft": false, "labels": [], "author": {"login": "dependabot[bot]"}}]
+}

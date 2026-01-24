@@ -1,0 +1,12 @@
+[Unit]
+Description=PR Attention - GitHub PR notification checker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pr-attention run
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target
