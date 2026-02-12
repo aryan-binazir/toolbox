@@ -149,6 +149,34 @@ wt delete quick-fix --window -y
 | `-f, --force` | Force deletion even with uncommitted changes |
 | `-w, --window` | Delete window in current session (requires being inside tmux) |
 
+### `wt slot`
+
+Creates one worktree slot from a fixed pool: `alpha`, `beta`, `gamma`, `delta`.
+
+```bash
+wt slot
+```
+
+Behavior:
+- checks existing worktrees in order `alpha` -> `beta` -> `gamma` -> `delta`
+- creates the first missing slot from `main` (or `--base`)
+- symlinks `<slot>/context` to `<base-worktree>/context`
+- stops at 4 total slots (errors when all 4 already exist)
+
+```bash
+wt slot --base main
+wt slot --base develop
+```
+
+### `make run`
+
+From the `wt/` directory:
+
+```bash
+make run ARGS="slot"
+make run ARGS="slot --base main"
+```
+
 ## How It Works
 
 ### Worktree Location

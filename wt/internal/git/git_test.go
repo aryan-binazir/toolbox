@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -239,5 +240,71 @@ func TestGetWorktreePath_NotFound(t *testing.T) {
 	_, err := GetWorktreePath("nonexistent", tmpDir)
 	if err != ErrWorktreeNotFound {
 		t.Errorf("GetWorktreePath() error = %v, want %v", err, ErrWorktreeNotFound)
+	}
+}
+
+func TestCreateWorktreeFromBase(t *testing.T) {
+	tmpDir, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	wtPath, err := CreateWorktreeFromBase("from-base", tmpDir, "from-base", "HEAD")
+	if err != nil {
+		t.Fatalf("CreateWorktreeFromBase() error = %v", err)
+	}
+
+	expected := filepath.Join(tmpDir, "from-base")
+	if wtPath != expected {
+		t.Fatalf("CreateWorktreeFromBase() = %s, want %s", wtPath, expected)
+	}
+
+	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
+		t.Fatalf("expected worktree path to exist: %s", wtPath)
+	}
+}
+
+func TestCreateWorktreeFromBase_InvalidInputs(t *testing.T) {
+	tmpDir, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	if _, err := CreateWorktreeFromBase("", tmpDir, "b", "HEAD"); err != ErrInvalidName {
+		t.Fatalf("expected ErrInvalidName for empty name, got %v", err)
+	}
+	if _, err := CreateWorktreeFromBase("x", tmpDir, "", "HEAD"); err != ErrInvalidName {
+		t.Fatalf("expected ErrInvalidName for empty branch, got %v", err)
+	}
+	if _, err := CreateWorktreeFromBase("x", tmpDir, "x", ""); err == nil || !strings.Contains(err.Error(), "base ref cannot be empty") {
+		t.Fatalf("expected base ref error, got %v", err)
+	}
+}
+
+func TestCreateWorktreeFromBase_AlreadyExists(t *testing.T) {
+	tmpDir, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	_, err := CreateWorktreeFromBase("dup-base", tmpDir, "dup-base", "HEAD")
+	if err != nil {
+		t.Fatalf("first CreateWorktreeFromBase() error = %v", err)
+	}
+
+	_, err = CreateWorktreeFromBase("dup-base", tmpDir, "dup-base", "HEAD")
+	if err != ErrWorktreeExists {
+		t.Fatalf("expected ErrWorktreeExists, got %v", err)
+	}
+}
+
+func TestRefExists(t *testing.T) {
+	_, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	if !RefExists("refs/heads/master") && !RefExists("refs/heads/main") {
+		t.Fatalf("expected either refs/heads/master or refs/heads/main to exist")
+	}
+
+	if RefExists("refs/heads/definitely-does-not-exist") {
+		t.Fatalf("expected missing ref to return false")
+	}
+
+	if RefExists("") {
+		t.Fatalf("expected empty ref to return false")
 	}
 }

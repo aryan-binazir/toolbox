@@ -99,6 +99,39 @@ func CreateWorktree(name, basePath, branch string) (string, error) {
 	return worktreePath, nil
 }
 
+func CreateWorktreeFromBase(name, basePath, branch, baseRef string) (string, error) {
+	if name == "" {
+		return "", ErrInvalidName
+	}
+	if branch == "" {
+		return "", ErrInvalidName
+	}
+	if baseRef == "" {
+		return "", fmt.Errorf("base ref cannot be empty")
+	}
+
+	worktreePath := filepath.Join(basePath, name)
+	args := []string{"worktree", "add", "-b", branch, worktreePath, baseRef}
+
+	cmd := exec.Command("git", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "already exists") {
+			return "", ErrWorktreeExists
+		}
+		return "", fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(string(out)))
+	}
+
+	return worktreePath, nil
+}
+
+func RefExists(ref string) bool {
+	if ref == "" {
+		return false
+	}
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", ref)
+	return cmd.Run() == nil
+}
+
 func RemoveWorktree(path string, force bool) error {
 	args := []string{"worktree", "remove"}
 	if force {
