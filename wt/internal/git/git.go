@@ -12,6 +12,7 @@ var (
 	ErrNotGitRepo       = errors.New("not inside a git repository")
 	ErrWorktreeExists   = errors.New("worktree already exists")
 	ErrWorktreeNotFound = errors.New("worktree not found")
+	ErrBranchExists     = errors.New("branch already exists")
 	ErrInvalidName      = errors.New("invalid worktree name")
 )
 
@@ -79,18 +80,34 @@ func CreateWorktree(name, basePath, branch string) (string, error) {
 	}
 
 	worktreePath := filepath.Join(basePath, name)
-
-	args := []string{"worktree", "add"}
-	if branch != "" {
-		args = append(args, "-b", branch)
-	} else {
-		args = append(args, "-b", name)
+	exists, err := worktreePathExists(worktreePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to check existing worktrees: %w", err)
 	}
-	args = append(args, worktreePath)
+	if exists {
+		return "", ErrWorktreeExists
+	}
+
+	branchName := branch
+	if branchName == "" {
+		branchName = name
+	}
+	if RefExists("refs/heads/" + branchName) {
+		return "", ErrBranchExists
+	}
+
+	args := []string{"worktree", "add", "-b", branchName, worktreePath}
 
 	cmd := exec.Command("git", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
 		if strings.Contains(string(out), "already exists") {
+			exists, err := worktreePathExists(worktreePath)
+			if err == nil && exists {
+				return "", ErrWorktreeExists
+			}
+			if RefExists("refs/heads/" + branchName) {
+				return "", ErrBranchExists
+			}
 			return "", ErrWorktreeExists
 		}
 		return "", fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(string(out)))
@@ -109,19 +126,49 @@ func CreateWorktreeFromBase(name, basePath, branch, baseRef string) (string, err
 	if baseRef == "" {
 		return "", fmt.Errorf("base ref cannot be empty")
 	}
-
 	worktreePath := filepath.Join(basePath, name)
+	exists, err := worktreePathExists(worktreePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to check existing worktrees: %w", err)
+	}
+	if exists {
+		return "", ErrWorktreeExists
+	}
+	if RefExists("refs/heads/" + branch) {
+		return "", ErrBranchExists
+	}
+
 	args := []string{"worktree", "add", "-b", branch, worktreePath, baseRef}
 
 	cmd := exec.Command("git", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
 		if strings.Contains(string(out), "already exists") {
+			exists, err := worktreePathExists(worktreePath)
+			if err == nil && exists {
+				return "", ErrWorktreeExists
+			}
+			if RefExists("refs/heads/" + branch) {
+				return "", ErrBranchExists
+			}
 			return "", ErrWorktreeExists
 		}
 		return "", fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(string(out)))
 	}
 
 	return worktreePath, nil
+}
+
+func worktreePathExists(worktreePath string) (bool, error) {
+	worktrees, err := ListWorktrees()
+	if err != nil {
+		return false, err
+	}
+	for _, wt := range worktrees {
+		if wt.Path == worktreePath {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func RefExists(ref string) bool {

@@ -46,10 +46,7 @@ func runSlotCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
-	existing := map[string]bool{}
-	for _, wt := range worktrees {
-		existing[filepath.Base(wt.Path)] = true
-	}
+	existing := existingSlots(worktrees, basePath)
 
 	slot := firstMissingSlot(existing)
 	if slot == "" {
@@ -79,7 +76,9 @@ func runSlotCreate(cmd *cobra.Command, args []string) error {
 
 	contextTarget := filepath.Join(worktreePath, "context")
 	if err := ensureContextSymlink(contextSource, contextTarget); err != nil {
-		_ = git.RemoveWorktree(worktreePath, true)
+		if cleanupErr := git.RemoveWorktree(worktreePath, true); cleanupErr != nil {
+			return fmt.Errorf("%w; additionally failed to roll back worktree '%s': %v", err, worktreePath, cleanupErr)
+		}
 		return err
 	}
 
@@ -96,6 +95,20 @@ func firstMissingSlot(existing map[string]bool) string {
 		}
 	}
 	return ""
+}
+
+func existingSlots(worktrees []git.Worktree, basePath string) map[string]bool {
+	existing := map[string]bool{}
+	for _, slot := range slotNames {
+		slotPath := filepath.Join(basePath, slot)
+		for _, wt := range worktrees {
+			if wt.Path == slotPath {
+				existing[slot] = true
+				break
+			}
+		}
+	}
+	return existing
 }
 
 func resolveBaseRef(baseBranch string) (string, error) {
@@ -119,24 +132,32 @@ func findBranchWorktreePath(worktrees []git.Worktree, branch string) (string, er
 }
 
 func ensureContextSymlink(contextSource, contextTarget string) error {
-	if fi, err := os.Lstat(contextTarget); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			target, readErr := os.Readlink(contextTarget)
-			if readErr != nil {
-				return fmt.Errorf("failed to read existing context symlink: %w", readErr)
-			}
-			if target == contextSource {
-				return nil
-			}
-			return fmt.Errorf("context symlink already exists with different target: %s", target)
-		}
-		return fmt.Errorf("context path already exists and is not a symlink: %s", contextTarget)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to inspect context path '%s': %w", contextTarget, err)
+	if err := os.Symlink(contextSource, contextTarget); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("failed to create context symlink: %w", err)
 	}
 
-	if err := os.Symlink(contextSource, contextTarget); err != nil {
-		return fmt.Errorf("failed to create context symlink: %w", err)
+	fi, err := os.Lstat(contextTarget)
+	if err != nil {
+		return fmt.Errorf("failed to inspect context path '%s': %w", contextTarget, err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("context path already exists and is not a symlink: %s", contextTarget)
+	}
+
+	target, readErr := os.Readlink(contextTarget)
+	if readErr != nil {
+		return fmt.Errorf("failed to read existing context symlink: %w", readErr)
+	}
+	if target != contextSource {
+		return fmt.Errorf("context symlink already exists with different target: %s", target)
+	}
+	if _, statErr := os.Stat(contextSource); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return fmt.Errorf("context symlink points to missing source: %s", contextSource)
+		}
+		return fmt.Errorf("failed to verify context source '%s': %w", contextSource, statErr)
 	}
 	return nil
 }

@@ -34,6 +34,23 @@ func TestFirstMissingSlot(t *testing.T) {
 	}
 }
 
+func TestExistingSlots_UsesConfiguredBasePath(t *testing.T) {
+	basePath := "/tmp/worktrees"
+	worktrees := []git.Worktree{
+		{Path: "/tmp/repo", Branch: "main"},
+		{Path: "/tmp/unrelated/alpha", Branch: "feature-a"},
+		{Path: filepath.Join(basePath, "beta"), Branch: "beta"},
+	}
+
+	got := existingSlots(worktrees, basePath)
+	if got["alpha"] {
+		t.Fatalf("expected unrelated alpha worktree to be ignored")
+	}
+	if !got["beta"] {
+		t.Fatalf("expected beta slot to be marked as existing")
+	}
+}
+
 func TestFindBranchWorktreePath(t *testing.T) {
 	worktrees := []git.Worktree{
 		{Path: "/tmp/repo", Branch: "main"},
@@ -102,6 +119,16 @@ func TestEnsureContextSymlink(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not a symlink") {
 		t.Fatalf("expected not a symlink error, got: %v", err)
 	}
+
+	brokenTarget := filepath.Join(tmpDir, "broken-target")
+	brokenSource := filepath.Join(tmpDir, "does-not-exist")
+	if err := os.Symlink(brokenSource, brokenTarget); err != nil {
+		t.Fatalf("failed to create broken symlink: %v", err)
+	}
+	err = ensureContextSymlink(brokenSource, brokenTarget)
+	if err == nil || !strings.Contains(err.Error(), "points to missing source") {
+		t.Fatalf("expected missing source error, got: %v", err)
+	}
 }
 
 func TestResolveBaseRef(t *testing.T) {
@@ -149,6 +176,13 @@ func TestRunSlotCreate_FailureCases(t *testing.T) {
 		}
 		defer os.Chdir(oldWd)
 
+		origWorktreeDir := worktreeDir
+		origSlotBaseBranch := slotBaseBranch
+		t.Cleanup(func() {
+			worktreeDir = origWorktreeDir
+			slotBaseBranch = origSlotBaseBranch
+		})
+
 		worktreeDir = ""
 		slotBaseBranch = "main"
 		err := runSlotCreate(nil, nil)
@@ -167,6 +201,13 @@ func TestRunSlotCreate_CreatesAllSlotsThenErrors(t *testing.T) {
 		t.Fatalf("failed to chdir: %v", err)
 	}
 	defer os.Chdir(oldWd)
+
+	origWorktreeDir := worktreeDir
+	origSlotBaseBranch := slotBaseBranch
+	t.Cleanup(func() {
+		worktreeDir = origWorktreeDir
+		slotBaseBranch = origSlotBaseBranch
+	})
 
 	worktreeDir = ""
 	slotBaseBranch = "main"

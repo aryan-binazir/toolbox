@@ -160,8 +160,23 @@ func TestCreateWorktree_AlreadyExists(t *testing.T) {
 	}
 
 	_, err = CreateWorktree("dup-branch", tmpDir, "")
-	if err == nil {
-		t.Error("second CreateWorktree() expected error, got nil")
+	if err != ErrWorktreeExists {
+		t.Fatalf("expected ErrWorktreeExists, got %v", err)
+	}
+}
+
+func TestCreateWorktree_BranchAlreadyExists(t *testing.T) {
+	tmpDir, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	cmd := exec.Command("git", "branch", "existing-branch")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to create existing branch: %v\n%s", err, out)
+	}
+
+	_, err := CreateWorktree("new-worktree", tmpDir, "existing-branch")
+	if err != ErrBranchExists {
+		t.Fatalf("expected ErrBranchExists, got %v", err)
 	}
 }
 
@@ -286,9 +301,24 @@ func TestCreateWorktreeFromBase_AlreadyExists(t *testing.T) {
 		t.Fatalf("first CreateWorktreeFromBase() error = %v", err)
 	}
 
-	_, err = CreateWorktreeFromBase("dup-base", tmpDir, "dup-base", "HEAD")
+	_, err = CreateWorktreeFromBase("dup-base", tmpDir, "dup-base-2", "HEAD")
 	if err != ErrWorktreeExists {
-		t.Fatalf("expected ErrWorktreeExists, got %v", err)
+		t.Fatalf("expected ErrWorktreeExists for duplicate worktree path, got %v", err)
+	}
+}
+
+func TestCreateWorktreeFromBase_BranchAlreadyExists(t *testing.T) {
+	tmpDir, cleanup := setupTestRepo(t)
+	defer cleanup()
+
+	cmd := exec.Command("git", "branch", "existing-branch")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to create existing branch: %v\n%s", err, out)
+	}
+
+	_, err := CreateWorktreeFromBase("from-base-new", tmpDir, "existing-branch", "HEAD")
+	if err != ErrBranchExists {
+		t.Fatalf("expected ErrBranchExists, got %v", err)
 	}
 }
 
