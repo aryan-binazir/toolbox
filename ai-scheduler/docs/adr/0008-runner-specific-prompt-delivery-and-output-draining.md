@@ -1,0 +1,3 @@
+# Runner-specific prompt delivery and output draining
+
+AI Scheduler will not force every runner prompt through stdin. Existing runner conventions pass prompts as arguments for Codex, Claude Code, and Cursor Agent, and the Codex convention explicitly redirects stdin from `/dev/null` to avoid unreliable headless behavior. Each runner config will declare how the prompt is delivered, Cursor Agent will use the readable `--force` dangerous flag instead of its `-f` shorthand, and the process manager must always drain stdout and stderr concurrently, store output incrementally, and enforce timeout/cancel behavior against the whole child process group.

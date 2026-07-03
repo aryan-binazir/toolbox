@@ -1,0 +1,76 @@
+[settings]
+timezone = "America/New_York"
+max_runs_per_routine = 25
+max_run_age_days = 90
+default_timeout_seconds = 1800
+stream_cap_bytes = 5242880
+
+[[runners]]
+id = "codex"
+label = "Codex"
+command = "codex"
+kind = "codex"
+args = ["exec", "{{dangerous_flag}}", "--model", "{{model}}", "-c", "model_reasoning_effort=\"{{effort}}\"", "{{prompt}}"]
+dangerous_flag = "--dangerously-bypass-approvals-and-sandbox"
+default_model = "gpt-5.5"
+default_effort = "xhigh"
+stdin = "null"
+default_timeout_seconds = 1800
+model_options = [{ value = "gpt-5.5", label = "GPT-5.5" }]
+effort_options = [
+  { value = "low", label = "Low" },
+  { value = "medium", label = "Medium" },
+  { value = "high", label = "High" },
+  { value = "xhigh", label = "Extra High" },
+]
+
+[[runners]]
+id = "claude"
+label = "Claude Code"
+command = "claude"
+kind = "claude"
+args = ["{{dangerous_flag}}", "-p", "--model", "{{model}}", "--effort", "{{effort}}", "{{prompt}}"]
+dangerous_flag = "--dangerously-skip-permissions"
+default_model = "sonnet"
+default_effort = "high"
+stdin = "null"
+default_timeout_seconds = 1800
+model_options = [
+  { value = "sonnet", label = "Sonnet" },
+  { value = "opus", label = "Opus" },
+  { value = "fable", label = "Fable" },
+]
+effort_options = [
+  { value = "low", label = "Low" },
+  { value = "medium", label = "Medium" },
+  { value = "high", label = "High" },
+  { value = "xhigh", label = "Extra High" },
+  { value = "max", label = "Max" },
+]
+
+[[runners]]
+id = "cursor"
+label = "Cursor Agent"
+command = "cursor-agent"
+kind = "cursor"
+args = ["--print", "{{dangerous_flag}}", "--model", "{{model}}", "{{prompt}}"]
+dangerous_flag = "--force"
+default_model = "composer-2.5"
+stdin = "null"
+default_timeout_seconds = 1800
+model_options = [
+  { value = "composer-2.5", label = "Composer 2.5" },
+  { value = "composer-2.5-fast", label = "Composer 2.5 Fast" },
+]
+
+[[routines]]
+title = "Example routine"
+description = "Replace this with a real routine."
+prompt = "Describe the work the selected runner should perform."
+runner = "cursor"
+model = "composer-2.5"
+cwd = "/tmp"
+schedule = "0 7 * * Sat"
+timezone = "America/New_York"
+paused = true
+dangerous = false
