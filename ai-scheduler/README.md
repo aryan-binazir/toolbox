@@ -7,11 +7,12 @@ Local desktop scheduler for AI CLI routines. The app targets Arch/Linux first an
 ```sh
 make test
 make install
+make install-local
 make update
 make bootstrap-config
 ```
 
-`make install` installs the app binary and desktop launcher. It does not overwrite `~/.config/ai-scheduler/config.toml` and does not touch `~/.local/share/ai-scheduler/runs.db`.
+`make install` and `make install-local` install the app binary and desktop launcher into the current user's local XDG paths. They do not overwrite `~/.config/ai-scheduler/config.toml` and do not touch `~/.local/share/ai-scheduler/runs.db`.
 
 ## Storage
 

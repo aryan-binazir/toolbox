@@ -3,8 +3,9 @@ BINDIR ?= $(PREFIX)/bin
 APPDIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)/applications
 CONFIG_DIR ?= $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/ai-scheduler
 BIN := src-tauri/target/release/ai-scheduler
+DEPS_STAMP := node_modules/.package-lock.json
 
-.PHONY: install update build test dev bootstrap-config clean
+.PHONY: deps install install-local update build test dev bootstrap-config clean
 
 install: build
 	install -d "$(BINDIR)"
@@ -22,14 +23,19 @@ install: build
 	@echo "Installed $(BINDIR)/ai-scheduler"
 	@echo "Config and run history were not modified."
 
+install-local: install
+
 update:
 	git pull --ff-only
 	$(MAKE) install
 
-build:
-	npm install
-	npm run build
-	cargo build --release --manifest-path src-tauri/Cargo.toml
+deps: $(DEPS_STAMP)
+
+$(DEPS_STAMP): package.json package-lock.json
+	npm ci
+
+build: deps
+	npm run tauri -- build --no-bundle
 
 test:
 	cargo test --manifest-path src-tauri/Cargo.toml
