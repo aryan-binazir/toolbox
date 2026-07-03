@@ -507,7 +507,7 @@ function newRoutine(): RoutineConfig {
     model: runner?.default_model ?? "",
     effort: runner?.default_effort ?? null,
     cwd: "",
-    schedule: "0 7 * * Sat",
+    schedule: "0 7 * * *",
     timezone: config.settings.timezone,
     paused: true,
     dangerous: false,
