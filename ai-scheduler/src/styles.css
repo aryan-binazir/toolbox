@@ -71,14 +71,15 @@ button:hover {
 
 .shell {
   display: grid;
-  grid-template-columns: minmax(360px, 42vw) minmax(520px, 1fr);
+  grid-template-columns: clamp(340px, 32vw, 460px) minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
 
 .sidebar {
   border-right: 1px solid var(--line);
-  padding: 16px 22px 24px;
+  min-width: 0;
+  padding: 16px 18px 24px;
   overflow: auto;
 }
 
@@ -100,12 +101,13 @@ button:hover {
 }
 
 .hero {
-  margin: 54px 8px 26px;
+  margin: clamp(28px, 6vh, 54px) 8px 24px;
 }
 
 .hero h1 {
   margin: 0;
-  font-size: 52px;
+  font-size: 44px;
+  line-height: 1.05;
   font-weight: 500;
   letter-spacing: 0;
 }
@@ -118,19 +120,19 @@ button:hover {
 
 .search {
   display: grid;
-  grid-template-columns: 32px 1fr;
+  grid-template-columns: 28px 1fr;
   align-items: center;
-  height: 48px;
+  height: 44px;
   border: 1px solid var(--line-strong);
   background: #2a2c2a;
-  border-radius: 24px;
-  padding: 0 16px;
-  margin-bottom: 46px;
+  border-radius: 22px;
+  padding: 0 14px;
+  margin-bottom: clamp(26px, 6vh, 46px);
 }
 
 .search span {
   color: var(--muted);
-  font-size: 26px;
+  font-size: 22px;
 }
 
 .search input {
@@ -152,19 +154,53 @@ button:hover {
   align-items: center;
   border-bottom: 1px solid var(--line);
   margin-bottom: 10px;
+  min-height: 42px;
+  padding-bottom: 8px;
 }
 
 h2 {
+  margin: 0;
   font-size: 21px;
+  line-height: 1.15;
   font-weight: 650;
   letter-spacing: 0;
 }
 
 .icon-button {
   width: 32px;
-  min-height: 32px;
+  height: 32px;
+  min-height: 0;
   padding: 0;
+  display: inline-grid;
+  place-items: center;
   border-radius: 50%;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.runner-refresh {
+  width: 34px;
+  height: 34px;
+  color: #b8beb6;
+  background: #1c211d;
+  border-color: #343b35;
+  border-radius: 8px;
+}
+
+.runner-refresh:hover {
+  color: var(--focus);
+  background: #222820;
+  border-color: #566050;
+}
+
+.runner-refresh svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .routine-list {
@@ -262,6 +298,7 @@ h2 {
 }
 
 .detail {
+  min-width: 0;
   overflow: auto;
   padding: 30px 42px 48px;
 }
