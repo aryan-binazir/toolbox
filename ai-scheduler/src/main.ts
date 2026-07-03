@@ -16,6 +16,7 @@ type RunnerConfig = {
   label: string;
   command: string;
   kind: string;
+  dangerous_flag?: string | null;
   default_model?: string;
   default_effort?: string;
   model_options: OptionValue[];
@@ -48,6 +49,9 @@ type RunnerCapability = {
   id: string;
   label: string;
   command: string;
+  resolved_path?: string | null;
+  path_env?: string | null;
+  probe_command: string[];
   available: boolean;
   version?: string | null;
   models: OptionValue[];
@@ -85,11 +89,24 @@ type RunRecord = {
   stderr_truncated: boolean;
 };
 
+type RoutineScheduleInfo = {
+  routine_id: string;
+  next_run_at?: string | null;
+  error?: string | null;
+};
+
+type SchedulePreview = {
+  next_run_at?: string | null;
+  error?: string | null;
+};
+
 type Snapshot = {
   config_path: string;
   db_path: string;
   config: AppConfig;
   runner_capabilities: RunnerCapability[];
+  scheduler_last_checked?: string | null;
+  routine_schedules: RoutineScheduleInfo[];
 };
 
 type State = {
@@ -101,6 +118,9 @@ type State = {
   rawOpen: boolean;
   rawText: string;
   formDraft?: RoutineConfig;
+  schedulePreview?: SchedulePreview & { key: string; checking?: boolean };
+  schedulePreviewTimer?: number;
+  schedulePreviewSeq: number;
   openRunIds: Set<string>;
   copiedRunId?: string;
   error?: string;
@@ -123,6 +143,7 @@ const state: State = {
   mode: "details",
   rawOpen: false,
   rawText: "",
+  schedulePreviewSeq: 0,
   openRunIds: new Set(),
   busy: false,
 };
@@ -141,9 +162,10 @@ const DAY_OPTIONS: OptionValue[] = [
   { value: "Sun", label: "Sunday" },
 ];
 const TIME_OPTIONS = buildTimeOptions();
+const ACTIVE_RUN_STATUSES: RunStatus[] = ["queued", "running"];
 
-async function loadSnapshot(keepSelection = true, renderOptions: RenderOptions = {}) {
-  clearError();
+async function loadSnapshot(keepSelection = true, renderOptions: RenderOptions = {}, clearExistingError = true) {
+  if (clearExistingError) clearError();
   try {
     state.snapshot = await invoke<Snapshot>("get_snapshot");
     const routines = state.snapshot.config.routines;
@@ -196,6 +218,19 @@ function capabilityFor(runnerId: string): RunnerCapability | undefined {
   return state.snapshot?.runner_capabilities.find((runner) => runner.id === runnerId);
 }
 
+function scheduleInfoFor(routineId?: string | null): RoutineScheduleInfo | undefined {
+  if (!routineId) return undefined;
+  return state.snapshot?.routine_schedules.find((schedule) => schedule.routine_id === routineId);
+}
+
+function isActiveStatus(status: RunStatus) {
+  return ACTIVE_RUN_STATUSES.includes(status);
+}
+
+function activeRun() {
+  return state.runs.find((run) => isActiveStatus(run.status));
+}
+
 function filteredRoutines(paused: boolean) {
   const query = state.query.trim().toLowerCase();
   return (state.snapshot?.config.routines ?? [])
@@ -216,6 +251,13 @@ function projectLabel(cwd: string) {
 function scheduleLabel(routine: RoutineConfig) {
   const timezone = routine.timezone || state.snapshot?.config.settings.timezone || "UTC";
   return `${friendlySchedule(routine.schedule)} · ${timezone}`;
+}
+
+function nextRunLabel(routine: RoutineConfig) {
+  const info = scheduleInfoFor(routine.id);
+  if (info?.error) return info.error;
+  if (!info?.next_run_at) return "—";
+  return formatDate(info.next_run_at);
 }
 
 function friendlySchedule(schedule: string) {
@@ -348,7 +390,11 @@ function renderRoutineRow(routine: RoutineConfig) {
       <span class="routine-copy">
         <span class="routine-title">${escapeHtml(routine.title)}</span>
         <span class="routine-project">${escapeHtml(projectLabel(routine.cwd))}</span>
-        <span class="routine-schedule">${routine.paused ? escapeHtml(scheduleLabel(routine)) : `Next · ${escapeHtml(scheduleLabel(routine))}`}</span>
+        <span class="routine-schedule">${
+          routine.paused
+            ? escapeHtml(scheduleLabel(routine))
+            : `Next · ${escapeHtml(nextRunLabel(routine))}`
+        }</span>
       </span>
     </button>
   `;
@@ -356,12 +402,16 @@ function renderRoutineRow(routine: RoutineConfig) {
 
 function renderRunnerStatus(runner: RunnerCapability) {
   const status = runner.available ? "ok" : "bad";
+  const command = runner.probe_command?.length ? shellJoin(runner.probe_command) : `${runner.command} --version`;
+  const readiness = runner.available ? "Version check passed; auth not verified" : "Version check failed";
   return `
     <div class="runner-status">
       <span class="runner-light ${status}"></span>
       <span>
         <strong>${escapeHtml(runner.label)}</strong>
         <small>${escapeHtml(runner.version || runner.error || "Not available")}</small>
+        <small>${escapeHtml(runner.resolved_path ? `Path ${runner.resolved_path}` : `Command ${runner.command} not resolved`)}</small>
+        <small>${escapeHtml(`${readiness} · ${command}`)}</small>
       </span>
     </div>
   `;
@@ -370,9 +420,14 @@ function renderRunnerStatus(runner: RunnerCapability) {
 function renderDetail(routine: RoutineConfig, runner?: RunnerConfig, capability?: RunnerCapability) {
   if (state.mode === "edit") return renderRoutineForm(state.formDraft ?? routine);
   const latest = state.runs[0];
+  const running = activeRun();
+  const nextRun = routine.paused ? "Paused" : nextRunLabel(routine);
+  const schedulerChecked = formatDate(state.snapshot?.scheduler_last_checked);
   return `
     <div class="detail-toolbar">
-      <button class="primary" data-action="run">▷ Run now</button>
+      ${running ? `<span class="toolbar-status">Running · ${formatDate(running.started_at || running.scheduled_for)}</span>` : ""}
+      <button class="primary" data-action="run" ${running ? "disabled" : ""}>▷ Run now</button>
+      ${running ? `<button class="danger" data-action="cancel-run">Cancel run</button>` : ""}
       <button data-action="toggle-selected-pause">${routine.paused ? "Resume" : "Pause"}</button>
       <button data-action="edit-routine">Edit</button>
       <button class="danger" data-action="delete-routine">Delete</button>
@@ -382,14 +437,16 @@ function renderDetail(routine: RoutineConfig, runner?: RunnerConfig, capability?
       <p>${escapeHtml(routine.description || "No description")}</p>
       <pre class="prompt">${escapeHtml(routine.prompt)}</pre>
       <dl class="meta-grid">
-        <div><dt>Status</dt><dd>${routine.paused ? "Paused" : "Active"}</dd></div>
+        <div><dt>Status</dt><dd>${running ? `Running · ${running.status}` : routine.paused ? "Paused" : "Active"}</dd></div>
         <div><dt>Runner</dt><dd>${escapeHtml(runner?.label ?? routine.runner)}</dd></div>
         <div><dt>Available</dt><dd>${capability?.available ? "Yes" : "No"}</dd></div>
         <div><dt>Model</dt><dd>${escapeHtml(routine.model || runner?.default_model || "—")}</dd></div>
         <div><dt>Effort</dt><dd>${escapeHtml(routine.effort || runner?.default_effort || "—")}</dd></div>
-        <div><dt>Dangerous</dt><dd>${routine.dangerous ? "On" : "Off"}</dd></div>
+        <div><dt>Dangerous</dt><dd>${escapeHtml(routine.dangerous ? `On · ${runner?.dangerous_flag || "runner flag"}` : "Off")}</dd></div>
         <div><dt>Working directory</dt><dd>${escapeHtml(routine.cwd)}</dd></div>
         <div><dt>Schedule</dt><dd>${escapeHtml(scheduleLabel(routine))}</dd></div>
+        <div><dt>Next run</dt><dd>${escapeHtml(nextRun)}</dd></div>
+        <div><dt>Scheduler checked</dt><dd>${schedulerChecked}</dd></div>
         <div><dt>Last run</dt><dd>${latest ? `${latest.status} · ${formatDate(latest.finished_at || latest.started_at || latest.scheduled_for)}` : "—"}</dd></div>
       </dl>
     </article>
@@ -445,6 +502,7 @@ function renderRoutineForm(routine: RoutineConfig) {
   const efforts = capability?.efforts.length ? capability.efforts : runner?.effort_options ?? [];
   const timeoutSeconds = routine.timeout_seconds ?? config.settings.default_timeout_seconds;
   const schedule = parseScheduleControls(routine.schedule);
+  const modelListId = `model-options-${escapeAttribute(runner?.id ?? "runner")}`;
   return `
     <form class="routine-form" id="routine-form">
       <div class="detail-toolbar">
@@ -457,7 +515,8 @@ function renderRoutineForm(routine: RoutineConfig) {
       <label>Prompt<textarea name="prompt" class="prompt-input" required>${escapeHtml(routine.prompt)}</textarea></label>
       <div class="form-grid">
         <label>Runner<select name="runner">${config.runners.map((item) => optionHtml(item.id, item.label, routine.runner)).join("")}</select></label>
-        <label>Model<select name="model">${models.map((item) => optionHtml(item.value, item.label, routine.model || runner?.default_model)).join("")}</select></label>
+        <label>Model<input name="model" list="${modelListId}" value="${escapeHtml(routine.model || runner?.default_model || "")}" required /></label>
+        <datalist id="${modelListId}">${models.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join("")}</datalist>
         <label>Effort<select name="effort"><option value="">—</option>${efforts.map((item) => optionHtml(item.value, item.label, routine.effort || runner?.default_effort)).join("")}</select></label>
         <label>Day<select name="schedule_day">${DAY_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.day)).join("")}${optionHtml(CUSTOM_SCHEDULE_VALUE, "Custom cron", schedule.day)}</select></label>
         ${
@@ -468,13 +527,38 @@ function renderRoutineForm(routine: RoutineConfig) {
         <label>Timezone<input name="timezone" value="${escapeHtml(routine.timezone || config.settings.timezone)}" required /></label>
         <label>Timeout seconds<input name="timeout_seconds" type="number" min="1" value="${timeoutSeconds}" /></label>
       </div>
-      <label>Working directory<input name="cwd" value="${escapeHtml(routine.cwd)}" required /></label>
+      ${renderSchedulePreview(routine)}
+      <label>Working directory
+        <span class="path-row">
+          <input name="cwd" value="${escapeHtml(routine.cwd)}" required />
+          <button type="button" data-action="choose-cwd">Browse</button>
+        </span>
+      </label>
       <div class="toggles">
         <label><input type="checkbox" name="paused" ${routine.paused ? "checked" : ""} /> Paused</label>
-        <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Yolo</label>
+        <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous mode</label>
       </div>
+      ${
+        runner?.dangerous_flag
+          ? `<div class="inline-note">Danger flag · ${escapeHtml(runner.dangerous_flag)}</div>`
+          : ""
+      }
     </form>
   `;
+}
+
+function renderSchedulePreview(routine: RoutineConfig) {
+  const key = schedulePreviewKey(routine);
+  const preview = state.schedulePreview?.key === key ? state.schedulePreview : undefined;
+  const className = preview?.error ? "bad" : preview?.next_run_at ? "ok" : "";
+  const value = preview?.checking
+    ? "Checking schedule"
+    : preview?.error
+      ? preview.error
+      : preview?.next_run_at
+        ? `Next run · ${formatDate(preview.next_run_at)}`
+        : "Schedule not checked";
+  return `<div class="schedule-preview ${className}">${escapeHtml(value)}</div>`;
 }
 
 function renderRawPanel() {
@@ -562,6 +646,30 @@ function buildSimpleSchedule(day: string, time: string) {
   return `${Number(minute)} ${Number(hour)} * * ${day}`;
 }
 
+function schedulePreviewKey(routine: RoutineConfig) {
+  return `${routine.schedule}::${routine.timezone || state.snapshot?.config.settings.timezone || ""}`;
+}
+
+function queueSchedulePreview(routine: RoutineConfig) {
+  const key = schedulePreviewKey(routine);
+  state.schedulePreview = { key, checking: true };
+  if (state.schedulePreviewTimer) window.clearTimeout(state.schedulePreviewTimer);
+  const sequence = ++state.schedulePreviewSeq;
+  state.schedulePreviewTimer = window.setTimeout(async () => {
+    try {
+      const preview = await invoke<SchedulePreview>("preview_schedule", { routine });
+      if (sequence !== state.schedulePreviewSeq) return;
+      state.schedulePreview = { key, ...preview };
+    } catch (error) {
+      if (sequence !== state.schedulePreviewSeq) return;
+      state.schedulePreview = { key, error: String(error) };
+    }
+    if (state.mode === "edit" || state.mode === "new") {
+      render({ preserveScroll: true });
+    }
+  }, 250);
+}
+
 function dayLabel(day: string) {
   return DAY_OPTIONS.find((option) => option.value === day)?.label ?? day;
 }
@@ -612,8 +720,11 @@ function wireEvents() {
   });
 
   const form = document.querySelector<HTMLFormElement>("#routine-form");
-  form?.addEventListener("input", () => {
+  form?.addEventListener("input", (event) => {
     state.formDraft = routineFromForm(form);
+    if (isSchedulePreviewField(event.target)) {
+      queueSchedulePreview(state.formDraft);
+    }
   });
   form?.addEventListener("change", (event) => {
     const draft = routineFromForm(form);
@@ -621,15 +732,20 @@ function wireEvents() {
       applyRunnerDefaults(draft);
       state.formDraft = draft;
       render();
+      queueSchedulePreview(draft);
       return;
     }
     if ((event.target as HTMLInputElement | HTMLSelectElement).name === "schedule_day") {
       if (!draft.schedule) draft.schedule = state.formDraft?.schedule || selectedRoutine()?.schedule || "0 7 * * Sat";
       state.formDraft = draft;
       render();
+      queueSchedulePreview(draft);
       return;
     }
     state.formDraft = draft;
+    if (isSchedulePreviewField(event.target)) {
+      queueSchedulePreview(draft);
+    }
   });
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -644,12 +760,15 @@ async function handleAction(action: string, element: HTMLElement) {
       state.formDraft = newRoutine();
       state.mode = "new";
       render();
+      queueSchedulePreview(state.formDraft);
     } else if (action === "edit-routine") {
       if (routine) state.formDraft = { ...routine };
       state.mode = "edit";
       render();
+      if (state.formDraft) queueSchedulePreview(state.formDraft);
     } else if (action === "cancel-edit") {
       state.formDraft = undefined;
+      state.schedulePreview = undefined;
       state.mode = "details";
       render();
     } else if (action === "toggle-pause") {
@@ -661,7 +780,15 @@ async function handleAction(action: string, element: HTMLElement) {
       await invoke("set_routine_paused", { routineId: routine.id, paused: !routine.paused });
       await loadSnapshot();
     } else if (action === "run" && routine?.id) {
+      if (activeRun()) {
+        setError("Cancel the active run before starting another one.");
+        render({ preserveScroll: true });
+        return;
+      }
       await invoke("run_routine", { routineId: routine.id });
+      await loadSnapshot();
+    } else if (action === "cancel-run" && routine?.id) {
+      await invoke("cancel_routine", { routineId: routine.id });
       await loadSnapshot();
     } else if (action === "delete-routine" && routine?.id) {
       if (confirm(`Delete "${routine.title}" and its stored runs?`)) {
@@ -687,6 +814,18 @@ async function handleAction(action: string, element: HTMLElement) {
     } else if (action === "refresh-runners") {
       await invoke("refresh_runner_capabilities");
       await loadSnapshot();
+    } else if (action === "choose-cwd") {
+      const form = document.querySelector<HTMLFormElement>("#routine-form");
+      const input = form?.elements.namedItem("cwd") as HTMLInputElement | null;
+      const selected = await invoke<string | null>("choose_working_directory", {
+        initial: input?.value || null,
+      });
+      if (form && input && selected) {
+        input.value = selected;
+        state.formDraft = routineFromForm(form);
+        render({ preserveScroll: true });
+        queueSchedulePreview(state.formDraft);
+      }
     } else if (action === "copy-run") {
       const run = state.runs.find((item) => item.id === element.dataset.runId);
       if (!run) return;
@@ -759,6 +898,11 @@ function applyRunnerDefaults(routine: RoutineConfig) {
   const runner = state.snapshot?.config.runners.find((item) => item.id === routine.runner);
   routine.model = runner?.default_model ?? null;
   routine.effort = runner?.default_effort ?? null;
+}
+
+function isSchedulePreviewField(target: EventTarget | null) {
+  const name = (target as HTMLInputElement | HTMLSelectElement | null)?.name;
+  return name === "schedule_day" || name === "schedule_time" || name === "schedule_custom" || name === "timezone";
 }
 
 function copyPayloadForRun(run: RunRecord) {
@@ -847,16 +991,15 @@ function escapeHtml(value: unknown) {
     .replaceAll('"', "&quot;");
 }
 
+function escapeAttribute(value: unknown) {
+  return escapeHtml(value).replaceAll(" ", "_");
+}
+
 loadSnapshot(false);
 setTimeout(() => loadSnapshot(true, { preserveScroll: true }), 1_000);
 setTimeout(() => loadSnapshot(true, { preserveScroll: true }), 8_000);
 setInterval(() => {
   if (!state.rawOpen && state.mode === "details") {
-    loadRuns()
-      .then(() => render({ preserveScroll: true }))
-      .catch((error) => {
-        setError(error);
-        render({ preserveScroll: true });
-      });
+    loadSnapshot(true, { preserveScroll: true }, false);
   }
 }, 3_000);

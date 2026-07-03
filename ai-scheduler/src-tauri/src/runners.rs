@@ -1,8 +1,10 @@
+use std::env;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{OptionValue, RunnerConfig, RunnerKind};
 
@@ -11,12 +13,28 @@ pub struct RunnerCapability {
     pub id: String,
     pub label: String,
     pub command: String,
+    pub resolved_path: Option<String>,
+    pub path_env: Option<String>,
+    pub probe_command: Vec<String>,
     pub available: bool,
     pub version: Option<String>,
     pub models: Vec<OptionValue>,
     pub efforts: Vec<OptionValue>,
     pub dangerous_supported: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexModelCatalog {
+    models: Vec<CodexModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexModel {
+    slug: String,
+    display_name: String,
+    #[serde(default)]
+    visibility: Option<String>,
 }
 
 pub fn probe_runners(runners: &[RunnerConfig]) -> Vec<RunnerCapability> {
@@ -39,6 +57,10 @@ pub fn configured_runner_capabilities(runners: &[RunnerConfig]) -> Vec<RunnerCap
             id: runner.id.clone(),
             label: runner.label.clone(),
             command: runner.command.clone(),
+            resolved_path: resolve_command_path(&runner.command)
+                .map(|path| path.display().to_string()),
+            path_env: env::var("PATH").ok(),
+            probe_command: vec![runner.command.clone(), "--version".to_string()],
             available: false,
             version: None,
             models: runner.model_options.clone(),
@@ -54,6 +76,9 @@ pub fn probe_runner(runner: &RunnerConfig) -> RunnerCapability {
         id: runner.id.clone(),
         label: runner.label.clone(),
         command: runner.command.clone(),
+        resolved_path: resolve_command_path(&runner.command).map(|path| path.display().to_string()),
+        path_env: env::var("PATH").ok(),
+        probe_command: vec![runner.command.clone(), "--version".to_string()],
         available: false,
         version: None,
         models: runner.model_options.clone(),
@@ -96,6 +121,16 @@ pub fn probe_runner(runner: &RunnerConfig) -> RunnerCapability {
             }
         }
         RunnerKind::Codex => {
+            if let Ok(output) = run_command(
+                &runner.command,
+                &["debug", "models"],
+                Duration::from_secs(5),
+            ) {
+                let models = parse_codex_models(&output);
+                if !models.is_empty() {
+                    capability.models = models;
+                }
+            }
             if capability.efforts.is_empty() {
                 capability.efforts = vec![
                     option("low", "Low"),
@@ -122,6 +157,18 @@ pub fn parse_cursor_models(output: &str) -> Vec<OptionValue> {
             }
             Some(option(id, label.trim()))
         })
+        .collect()
+}
+
+pub fn parse_codex_models(output: &str) -> Vec<OptionValue> {
+    let Ok(catalog) = serde_json::from_str::<CodexModelCatalog>(output) else {
+        return vec![];
+    };
+    catalog
+        .models
+        .into_iter()
+        .filter(|model| model.visibility.as_deref().unwrap_or("list") == "list")
+        .map(|model| option(&model.slug, &model.display_name))
         .collect()
 }
 
@@ -172,6 +219,18 @@ fn option(value: &str, label: &str) -> OptionValue {
     }
 }
 
+fn resolve_command_path(command: &str) -> Option<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return command_path.is_file().then(|| command_path.to_path_buf());
+    }
+
+    let paths = env::var_os("PATH")?;
+    env::split_paths(&paths)
+        .map(|path| path.join(command))
+        .find(|path| path.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +254,47 @@ Tip: use --model <id> to switch.
         assert_eq!(models[1].value, "composer-2.5");
         assert_eq!(models[2].label, "Composer 2.5 Fast (default)");
         assert_eq!(models[3].value, "gpt-5.5-extra-high-fast");
+    }
+
+    #[test]
+    fn parses_codex_model_catalog() {
+        let models = parse_codex_models(
+            r#"
+{
+  "models": [
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "visibility": "list"
+    },
+    {
+      "slug": "gpt-5.3-codex-spark",
+      "display_name": "GPT-5.3 Codex Spark",
+      "visibility": "list"
+    },
+    {
+      "slug": "internal-model",
+      "display_name": "Internal",
+      "visibility": "hidden"
+    }
+  ]
+}
+"#,
+        );
+
+        assert_eq!(
+            models,
+            vec![
+                option("gpt-5.5", "GPT-5.5"),
+                option("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark")
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_command_from_path() {
+        let path = resolve_command_path("sh").unwrap();
+
+        assert!(path.display().to_string().contains("sh"));
     }
 }

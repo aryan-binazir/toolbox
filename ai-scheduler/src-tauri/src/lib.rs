@@ -11,12 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use config::{
     builtin_default_config, canonical_toml, load_config, load_raw_config_preserving_text,
     normalize_config, save_config, save_config_text, AppConfig, RoutineConfig,
 };
 use paths::AppPaths;
 use runners::{configured_runner_capabilities, probe_runners, RunnerCapability};
+use scheduler::{RoutineScheduleInfo, SchedulePreview};
 use serde::Serialize;
 use store::{RunRecord, RunStore};
 use thiserror::Error;
@@ -59,6 +61,8 @@ pub struct AppSnapshot {
     pub db_path: PathBuf,
     pub config: AppConfig,
     pub runner_capabilities: Vec<RunnerCapability>,
+    pub scheduler_last_checked: Option<DateTime<Utc>>,
+    pub routine_schedules: Vec<RoutineScheduleInfo>,
 }
 
 impl AppState {
@@ -69,6 +73,7 @@ impl AppState {
             save_config(&paths.config_file, &loaded.config)?;
         }
         let store = Arc::new(RunStore::open(&paths.db_file)?);
+        store.cancel_active_runs_on_startup()?;
         store.prune(
             loaded.config.settings.max_runs_per_routine,
             loaded.config.settings.max_run_age_days,
@@ -148,11 +153,15 @@ fn ensure_config_exists(path: &PathBuf) -> Result<(), AppError> {
 #[tauri::command]
 async fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, AppError> {
     let config = state.config();
+    let scheduler_last_checked = state.store.scheduler_last_checked()?;
+    let routine_schedules = scheduler::routine_schedule_infos(&config, Utc::now());
     Ok(AppSnapshot {
         config_path: state.paths.config_file.clone(),
         db_path: state.paths.db_file.clone(),
         config,
         runner_capabilities: state.runner_capabilities(),
+        scheduler_last_checked,
+        routine_schedules,
     })
 }
 
@@ -177,6 +186,30 @@ async fn save_raw_config(
     save_config_text(&state.paths.config_file, &raw)?;
     state.set_config(config.clone());
     Ok(config)
+}
+
+#[tauri::command]
+async fn preview_schedule(
+    state: tauri::State<'_, AppState>,
+    routine: RoutineConfig,
+) -> Result<SchedulePreview, AppError> {
+    Ok(scheduler::preview_schedule(
+        &state.config(),
+        &routine,
+        Utc::now(),
+    ))
+}
+
+#[tauri::command]
+async fn choose_working_directory(initial: Option<String>) -> Result<Option<PathBuf>, AppError> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(initial) = initial {
+        let path = PathBuf::from(initial);
+        if path.is_dir() {
+            dialog = dialog.set_directory(path);
+        }
+    }
+    Ok(dialog.pick_folder())
 }
 
 #[tauri::command]
@@ -277,7 +310,7 @@ async fn run_routine(
     let store = state.store();
     state
         .process_manager()
-        .start_run(store, config.settings.clone(), runner, routine, None)
+        .start_manual_run(store, config.settings.clone(), runner, routine)
         .map_err(Into::into)
 }
 
@@ -323,6 +356,8 @@ pub fn run() {
             refresh_runner_capabilities,
             get_raw_config,
             save_raw_config,
+            preview_schedule,
+            choose_working_directory,
             list_runs,
             save_routine,
             set_routine_paused,

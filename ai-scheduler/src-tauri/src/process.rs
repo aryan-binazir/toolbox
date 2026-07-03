@@ -23,6 +23,8 @@ pub enum ProcessError {
     MissingRoutineId(String),
     #[error("runner `{0}` is missing a model and no routine model was provided")]
     MissingModel(String),
+    #[error("routine `{0}` is already running")]
+    AlreadyRunning(String),
 }
 
 #[derive(Clone, Default)]
@@ -35,6 +37,12 @@ struct ActiveRun {
     run_id: String,
     pgid: Arc<Mutex<Option<i32>>>,
     cancel_reason: Arc<Mutex<Option<CancelReason>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlapPolicy {
+    Replace,
+    Reject,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -66,35 +74,93 @@ impl ProcessManager {
         routine: RoutineConfig,
         scheduled_for: Option<chrono::DateTime<Utc>>,
     ) -> Result<RunRecord, ProcessError> {
+        self.start_run_with_policy(
+            store,
+            settings,
+            runner,
+            routine,
+            scheduled_for,
+            OverlapPolicy::Replace,
+        )
+    }
+
+    pub fn start_manual_run(
+        &self,
+        store: Arc<RunStore>,
+        settings: Settings,
+        runner: RunnerConfig,
+        routine: RoutineConfig,
+    ) -> Result<RunRecord, ProcessError> {
+        self.start_run_with_policy(
+            store,
+            settings,
+            runner,
+            routine,
+            None,
+            OverlapPolicy::Reject,
+        )
+    }
+
+    fn start_run_with_policy(
+        &self,
+        store: Arc<RunStore>,
+        settings: Settings,
+        runner: RunnerConfig,
+        routine: RoutineConfig,
+        scheduled_for: Option<chrono::DateTime<Utc>>,
+        overlap_policy: OverlapPolicy,
+    ) -> Result<RunRecord, ProcessError> {
         let routine_id = routine
             .id
             .clone()
             .ok_or_else(|| ProcessError::MissingRoutineId(routine.title.clone()))?;
-        self.cancel_routine(&routine_id, CancelReason::Superseded);
 
         let argv = expand_args(&runner, &routine)?;
         let command_for_history = std::iter::once(runner.command.clone())
             .chain(argv.iter().cloned())
             .collect::<Vec<_>>();
-        let queued = store.create_run(NewRun {
-            routine_id: routine_id.clone(),
-            routine_title: routine.title.clone(),
-            status: RunStatus::Queued,
-            scheduled_for,
-            command: command_for_history,
-            cwd: routine.cwd.display().to_string(),
-            cancel_reason: None,
-        })?;
 
+        let run_id = RunStore::new_run_id();
         let active = ActiveRun {
-            run_id: queued.id.clone(),
+            run_id: run_id.clone(),
             pgid: Arc::new(Mutex::new(None)),
             cancel_reason: Arc::new(Mutex::new(None)),
         };
-        self.active
-            .lock()
-            .expect("active lock poisoned")
-            .insert(routine_id.clone(), active.clone());
+        let replaced = {
+            let mut active_runs = self.active.lock().expect("active lock poisoned");
+            let replaced = if let Some(active) = active_runs.get(&routine_id).cloned() {
+                match overlap_policy {
+                    OverlapPolicy::Reject => return Err(ProcessError::AlreadyRunning(routine_id)),
+                    OverlapPolicy::Replace => Some(active),
+                }
+            } else {
+                None
+            };
+            active_runs.insert(routine_id.clone(), active.clone());
+            replaced
+        };
+        if let Some(replaced) = replaced {
+            request_cancel(&replaced, CancelReason::Superseded);
+        }
+
+        let queued = match store.create_run_with_id(
+            run_id,
+            NewRun {
+                routine_id: routine_id.clone(),
+                routine_title: routine.title.clone(),
+                status: RunStatus::Queued,
+                scheduled_for,
+                command: command_for_history,
+                cwd: routine.cwd.display().to_string(),
+                cancel_reason: None,
+            },
+        ) {
+            Ok(queued) => queued,
+            Err(err) => {
+                self.remove_active(&routine_id, &active.run_id);
+                return Err(err.into());
+            }
+        };
 
         let manager = self.clone();
         thread::spawn(move || {
@@ -111,12 +177,15 @@ impl ProcessManager {
             .expect("active lock poisoned")
             .get(routine_id)
             .cloned()?;
-        *active.cancel_reason.lock().expect("cancel lock poisoned") = Some(reason);
-        if let Some(pgid) = *active.pgid.lock().expect("pgid lock poisoned") {
-            terminate_process_group(pgid);
-            thread::spawn(move || wait_then_kill(pgid, Duration::from_secs(5)));
-        }
+        request_cancel(&active, reason);
         Some(active.run_id)
+    }
+
+    pub fn has_active_routine(&self, routine_id: &str) -> bool {
+        self.active
+            .lock()
+            .expect("active lock poisoned")
+            .contains_key(routine_id)
     }
 
     pub fn cancel_all(&self, reason: CancelReason) {
@@ -250,8 +319,20 @@ impl ProcessManager {
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let stdout_reader = thread::spawn(move || read_capped(stdout, stream_cap));
-        let stderr_reader = thread::spawn(move || read_capped(stderr, stream_cap));
+        let stdout_store = store.clone();
+        let stdout_run_id = active.run_id.clone();
+        let stdout_reader = thread::spawn(move || {
+            read_capped(stdout, stream_cap, |text, truncated| {
+                let _ = stdout_store.update_stdout(&stdout_run_id, text, truncated);
+            })
+        });
+        let stderr_store = store.clone();
+        let stderr_run_id = active.run_id.clone();
+        let stderr_reader = thread::spawn(move || {
+            read_capped(stderr, stream_cap, |text, truncated| {
+                let _ = stderr_store.update_stderr(&stderr_run_id, text, truncated);
+            })
+        });
 
         let start = Instant::now();
         let exit_status = loop {
@@ -377,12 +458,21 @@ pub fn expand_args(
     Ok(args)
 }
 
-fn read_capped(reader: Option<impl Read>, cap: usize) -> (String, bool) {
+fn read_capped(
+    reader: Option<impl Read>,
+    cap: usize,
+    mut on_update: impl FnMut(&str, bool),
+) -> (String, bool) {
     let Some(mut reader) = reader else {
         return (String::new(), false);
     };
     let mut output = Vec::new();
     let mut truncated = false;
+    let mut last_update_len = 0;
+    let mut last_update_truncated = false;
+    let mut last_update_at: Option<Instant> = None;
+    let update_interval = Duration::from_millis(250);
+    let update_byte_step = 64 * 1024;
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer) {
@@ -398,11 +488,32 @@ fn read_capped(reader: Option<impl Read>, cap: usize) -> (String, bool) {
                 if take < n {
                     truncated = true;
                 }
+                let now = Instant::now();
+                let first_update = last_update_at.is_none();
+                let enough_bytes = output.len().saturating_sub(last_update_len) >= update_byte_step;
+                let enough_time =
+                    last_update_at.is_some_and(|last| now.duration_since(last) >= update_interval);
+                let truncation_changed = truncated != last_update_truncated;
+                if first_update || enough_bytes || enough_time || truncation_changed {
+                    let text = String::from_utf8_lossy(&output).to_string();
+                    on_update(&text, truncated);
+                    last_update_len = output.len();
+                    last_update_truncated = truncated;
+                    last_update_at = Some(now);
+                }
             }
             Err(_) => break,
         }
     }
     (String::from_utf8_lossy(&output).to_string(), truncated)
+}
+
+fn request_cancel(active: &ActiveRun, reason: CancelReason) {
+    *active.cancel_reason.lock().expect("cancel lock poisoned") = Some(reason);
+    if let Some(pgid) = *active.pgid.lock().expect("pgid lock poisoned") {
+        terminate_process_group(pgid);
+        thread::spawn(move || wait_then_kill(pgid, Duration::from_secs(5)));
+    }
 }
 
 fn terminate_process_group(pgid: i32) {
@@ -533,6 +644,133 @@ mod tests {
         assert_eq!(finished.status, RunStatus::Succeeded);
         assert_eq!(finished.stdout, "out");
         assert_eq!(finished.stderr, "err");
+    }
+
+    #[test]
+    fn stores_stdout_while_process_is_running() {
+        let store = Arc::new(RunStore::in_memory().unwrap());
+        let manager = ProcessManager::default();
+        let runner = RunnerConfig {
+            id: "shell".to_string(),
+            label: "Shell".to_string(),
+            command: "/bin/sh".to_string(),
+            kind: RunnerKind::Custom,
+            args: vec![
+                "-c".to_string(),
+                "printf start; sleep 1; printf end".to_string(),
+            ],
+            dangerous_flag: None,
+            default_model: Some("none".to_string()),
+            default_effort: None,
+            model_options: vec![],
+            effort_options: vec![],
+            stdin: StdinMode::Null,
+            default_timeout_seconds: Some(5),
+        };
+        let routine = RoutineConfig {
+            id: Some("rtn_live".to_string()),
+            title: "Live".to_string(),
+            description: String::new(),
+            prompt: "ignored".to_string(),
+            runner: "shell".to_string(),
+            model: Some("none".to_string()),
+            effort: None,
+            cwd: PathBuf::from("/tmp"),
+            schedule: "0 7 * * Sat".to_string(),
+            timezone: None,
+            paused: false,
+            dangerous: false,
+            timeout_seconds: Some(5),
+        };
+
+        let queued = manager
+            .start_run(store.clone(), Settings::default(), runner, routine, None)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let partial = loop {
+            let run = store.get_run(&queued.id).unwrap().unwrap();
+            if run.stdout == "start" {
+                break run;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(25));
+        };
+
+        assert_eq!(partial.status, RunStatus::Running);
+        assert!(manager.has_active_routine("rtn_live"));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let run = store.get_run(&queued.id).unwrap().unwrap();
+            if !matches!(run.status, RunStatus::Queued | RunStatus::Running) {
+                assert_eq!(run.stdout, "startend");
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn manual_run_rejects_existing_active_run() {
+        let store = Arc::new(RunStore::in_memory().unwrap());
+        let manager = ProcessManager::default();
+        let runner = RunnerConfig {
+            id: "shell".to_string(),
+            label: "Shell".to_string(),
+            command: "/bin/sh".to_string(),
+            kind: RunnerKind::Custom,
+            args: vec!["-c".to_string(), "sleep 1".to_string()],
+            dangerous_flag: None,
+            default_model: Some("none".to_string()),
+            default_effort: None,
+            model_options: vec![],
+            effort_options: vec![],
+            stdin: StdinMode::Null,
+            default_timeout_seconds: Some(5),
+        };
+        let routine = RoutineConfig {
+            id: Some("rtn_manual".to_string()),
+            title: "Manual".to_string(),
+            description: String::new(),
+            prompt: "ignored".to_string(),
+            runner: "shell".to_string(),
+            model: Some("none".to_string()),
+            effort: None,
+            cwd: PathBuf::from("/tmp"),
+            schedule: "0 7 * * Sat".to_string(),
+            timezone: None,
+            paused: false,
+            dangerous: false,
+            timeout_seconds: Some(5),
+        };
+
+        let queued = manager
+            .start_manual_run(
+                store.clone(),
+                Settings::default(),
+                runner.clone(),
+                routine.clone(),
+            )
+            .unwrap();
+        let err = manager
+            .start_manual_run(store.clone(), Settings::default(), runner, routine)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("already running"));
+        assert_eq!(store.list_runs_for_routine("rtn_manual").unwrap().len(), 1);
+
+        manager.cancel_routine("rtn_manual", CancelReason::User);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let run = store.get_run(&queued.id).unwrap().unwrap();
+            if !matches!(run.status, RunStatus::Queued | RunStatus::Running) {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

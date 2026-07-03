@@ -5,12 +5,26 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use chrono_tz::Tz;
 use cron::Schedule as CronSchedule;
+use serde::Serialize;
 
 use crate::config::{normalize_cron, AppConfig, RoutineConfig};
 use crate::store::{NewRun, RunStatus};
 use crate::AppState;
 
 const FRESH_RUN_WINDOW: TimeDelta = TimeDelta::seconds(60);
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoutineScheduleInfo {
+    pub routine_id: String,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SchedulePreview {
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
 
 pub fn start_scheduler(state: AppState, _app_handle: tauri::AppHandle) {
     thread::spawn(move || {
@@ -145,6 +159,59 @@ pub fn due_occurrences(
         due.push(occurrence)
     });
     due
+}
+
+pub fn routine_schedule_infos(config: &AppConfig, now: DateTime<Utc>) -> Vec<RoutineScheduleInfo> {
+    config
+        .routines
+        .iter()
+        .filter_map(|routine| {
+            let routine_id = routine.id.clone()?;
+            let preview = preview_schedule(config, routine, now);
+            Some(RoutineScheduleInfo {
+                routine_id,
+                next_run_at: preview.next_run_at,
+                error: preview.error,
+            })
+        })
+        .collect()
+}
+
+pub fn preview_schedule(
+    config: &AppConfig,
+    routine: &RoutineConfig,
+    now: DateTime<Utc>,
+) -> SchedulePreview {
+    match next_due_occurrence(config, routine, now) {
+        Ok(next_run_at) => SchedulePreview {
+            next_run_at,
+            error: None,
+        },
+        Err(error) => SchedulePreview {
+            next_run_at: None,
+            error: Some(error),
+        },
+    }
+}
+
+fn next_due_occurrence(
+    config: &AppConfig,
+    routine: &RoutineConfig,
+    after: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
+    let timezone = routine
+        .timezone
+        .as_deref()
+        .unwrap_or(config.settings.timezone.as_str());
+    let tz = timezone
+        .parse::<Tz>()
+        .map_err(|_| format!("invalid timezone `{timezone}`"))?;
+    let schedule = CronSchedule::from_str(&normalize_cron(&routine.schedule))
+        .map_err(|err| format!("schedule is invalid: {err}"))?;
+    Ok(schedule
+        .after(&after.with_timezone(&tz))
+        .next()
+        .map(|due| due.with_timezone(&Utc)))
 }
 
 fn for_each_due_occurrence(
@@ -295,5 +362,70 @@ mod tests {
         let due = due_occurrences(&config, &routine, since, until);
 
         assert_eq!(due.len(), 48);
+    }
+
+    #[test]
+    fn previews_next_due_occurrence() {
+        let config = AppConfig {
+            settings: Settings {
+                timezone: "America/New_York".to_string(),
+                ..Settings::default()
+            },
+            runners: vec![],
+            routines: vec![],
+        };
+        let routine = RoutineConfig {
+            id: Some("rtn_preview".to_string()),
+            title: "Routine".to_string(),
+            description: String::new(),
+            prompt: "Do it.".to_string(),
+            runner: "codex".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            effort: Some("xhigh".to_string()),
+            cwd: PathBuf::from("/tmp"),
+            schedule: "0 7 * * Sat".to_string(),
+            timezone: None,
+            paused: false,
+            dangerous: false,
+            timeout_seconds: None,
+        };
+        let now = Utc.with_ymd_and_hms(2026, 7, 3, 0, 0, 0).unwrap();
+
+        let preview = preview_schedule(&config, &routine, now);
+
+        assert_eq!(
+            preview.next_run_at,
+            Some(Utc.with_ymd_and_hms(2026, 7, 4, 11, 0, 0).unwrap())
+        );
+        assert_eq!(preview.error, None);
+    }
+
+    #[test]
+    fn schedule_preview_reports_invalid_cron() {
+        let config = AppConfig {
+            settings: Settings::default(),
+            runners: vec![],
+            routines: vec![],
+        };
+        let routine = RoutineConfig {
+            id: Some("rtn_bad".to_string()),
+            title: "Routine".to_string(),
+            description: String::new(),
+            prompt: "Do it.".to_string(),
+            runner: "codex".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            effort: Some("xhigh".to_string()),
+            cwd: PathBuf::from("/tmp"),
+            schedule: "not cron".to_string(),
+            timezone: None,
+            paused: false,
+            dangerous: false,
+            timeout_seconds: None,
+        };
+
+        let preview = preview_schedule(&config, &routine, Utc::now());
+
+        assert!(preview.next_run_at.is_none());
+        assert!(preview.error.unwrap().contains("schedule is invalid"));
     }
 }

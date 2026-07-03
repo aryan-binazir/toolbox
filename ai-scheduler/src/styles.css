@@ -57,6 +57,13 @@ button:hover {
   background: #2a2e2a;
 }
 
+button:disabled {
+  color: var(--muted-2);
+  background: #1a1d1a;
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
 .primary {
   color: #10120f;
   background: var(--focus);
@@ -295,6 +302,11 @@ h2 {
 .runner-status span:last-child {
   display: grid;
   gap: 2px;
+  min-width: 0;
+}
+
+.runner-status small {
+  overflow-wrap: anywhere;
 }
 
 .detail {
@@ -306,6 +318,7 @@ h2 {
 .detail-toolbar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 10px;
   margin-bottom: 48px;
   position: sticky;
@@ -313,6 +326,11 @@ h2 {
   z-index: 2;
   background: linear-gradient(var(--bg) 70%, transparent);
   padding-bottom: 10px;
+}
+
+.toolbar-status {
+  margin-right: auto;
+  color: var(--accent-2);
 }
 
 .routine-detail h1 {
@@ -490,6 +508,35 @@ dd {
 
 .custom-schedule {
   grid-column: span 2;
+}
+
+.schedule-preview {
+  color: var(--muted);
+  border: 1px solid var(--line);
+  background: #151815;
+  border-radius: 7px;
+  padding: 10px 12px;
+}
+
+.schedule-preview.ok {
+  color: #dff5d1;
+  border-color: rgba(143, 208, 111, 0.35);
+}
+
+.schedule-preview.bad {
+  color: #ffd8d4;
+  border-color: rgba(255, 116, 104, 0.45);
+}
+
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.inline-note {
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .toggles {

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
-use std::{env, fs};
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
+use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule as CronSchedule;
 use nanoid::nanoid;
@@ -214,6 +215,7 @@ pub fn save_config_text(path: impl AsRef<Path>, text: &str) -> Result<(), Config
             source,
         })?;
     }
+    backup_existing_config(path)?;
     fs::write(path, text).map_err(|source| ConfigError::Write {
         path: path.to_path_buf(),
         source,
@@ -270,6 +272,47 @@ fn expand_home_path(path: &Path) -> Option<PathBuf> {
         return Some(home);
     }
     value.strip_prefix("~/").map(|suffix| home.join(suffix))
+}
+
+fn backup_existing_config(path: &Path) -> Result<(), ConfigError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9fZ");
+    let backup_name = format!("{file_name}.bak-{timestamp}");
+    let backup_path = path.with_file_name(backup_name);
+    fs::copy(path, &backup_path).map_err(|source| ConfigError::Write {
+        path: backup_path,
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn backup_files_for(path: &Path) -> Vec<PathBuf> {
+    let Some(parent) = path.parent() else {
+        return vec![];
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return vec![];
+    };
+    let prefix = format!("{file_name}.bak-");
+    let mut backups = fs::read_dir(parent)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect::<Vec<_>>();
+    backups.sort();
+    backups
 }
 
 pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
@@ -397,7 +440,10 @@ pub fn builtin_default_config() -> AppConfig {
                 dangerous_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
                 default_model: Some("gpt-5.5".to_string()),
                 default_effort: Some("xhigh".to_string()),
-                model_options: vec![option("gpt-5.5", "GPT-5.5")],
+                model_options: vec![
+                    option("gpt-5.5", "GPT-5.5"),
+                    option("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
+                ],
                 effort_options: vec![
                     option("low", "Low"),
                     option("medium", "Medium"),
@@ -676,5 +722,19 @@ schedule = "0 9 * * Mon-Fri"
         );
 
         load_config_from_str(&text).unwrap();
+    }
+
+    #[test]
+    fn save_config_text_creates_backup_before_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "old").unwrap();
+
+        save_config_text(&path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let backups = backup_files_for(&path);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "old");
     }
 }

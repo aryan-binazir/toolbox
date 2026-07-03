@@ -8,6 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+const STORE_SCHEMA_VERSION: &str = "1";
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
@@ -109,6 +111,10 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    pub fn new_run_id() -> String {
+        format!("run_{}", nanoid!(16))
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -160,13 +166,28 @@ impl RunStore {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
+        )?;
+        conn.execute(
+            r#"
+            INSERT INTO app_meta (key, value)
+            VALUES ('schema_version', ?1)
+            ON CONFLICT(key) DO NOTHING
+            "#,
+            params![STORE_SCHEMA_VERSION],
         )?;
         Ok(())
     }
 
     pub fn create_run(&self, run: NewRun) -> Result<RunRecord, StoreError> {
-        let id = format!("run_{}", nanoid!(16));
+        self.create_run_with_id(Self::new_run_id(), run)
+    }
+
+    pub fn create_run_with_id(&self, id: String, run: NewRun) -> Result<RunRecord, StoreError> {
         let now = Utc::now();
         let command_json = serde_json::to_string(&run.command).unwrap_or_else(|_| "[]".to_string());
         let conn = self.conn.lock().expect("store lock poisoned");
@@ -231,6 +252,50 @@ impl RunStore {
                 finish.stderr_truncated as i64,
                 run_id,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn cancel_active_runs_on_startup(&self) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let finished_at = fmt_time(Utc::now());
+        conn.execute(
+            r#"
+            UPDATE runs
+            SET status = ?1,
+                finished_at = ?2,
+                cancel_reason = ?3
+            WHERE status IN ('queued', 'running')
+            "#,
+            params![RunStatus::Cancelled.as_str(), finished_at, "app_restarted",],
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn update_stdout(
+        &self,
+        run_id: &str,
+        stdout: &str,
+        truncated: bool,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "UPDATE runs SET stdout = ?1, stdout_truncated = ?2 WHERE id = ?3",
+            params![stdout, truncated as i64, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_stderr(
+        &self,
+        run_id: &str,
+        stderr: &str,
+        truncated: bool,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "UPDATE runs SET stderr = ?1, stderr_truncated = ?2 WHERE id = ?3",
+            params![stderr, truncated as i64, run_id],
         )?;
         Ok(())
     }
@@ -317,6 +382,17 @@ impl RunStore {
             params![fmt_time(value)],
         )?;
         Ok(())
+    }
+
+    pub fn schema_version(&self) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.query_row(
+            "SELECT value FROM app_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 }
 
@@ -418,5 +494,63 @@ mod tests {
 
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().any(|run| run.status == RunStatus::Running));
+    }
+
+    #[test]
+    fn stores_schema_version() {
+        let store = RunStore::in_memory().unwrap();
+
+        assert_eq!(
+            store.schema_version().unwrap().as_deref(),
+            Some(STORE_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn updates_output_before_finish() {
+        let store = RunStore::in_memory().unwrap();
+        let run = store
+            .create_run(NewRun {
+                routine_id: "rtn_a".to_string(),
+                routine_title: "Routine".to_string(),
+                status: RunStatus::Running,
+                scheduled_for: None,
+                command: vec![],
+                cwd: "/tmp".to_string(),
+                cancel_reason: None,
+            })
+            .unwrap();
+
+        store.update_stdout(&run.id, "partial", false).unwrap();
+        store.update_stderr(&run.id, "warn", true).unwrap();
+
+        let updated = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(updated.stdout, "partial");
+        assert_eq!(updated.stderr, "warn");
+        assert!(!updated.stdout_truncated);
+        assert!(updated.stderr_truncated);
+    }
+
+    #[test]
+    fn cancels_stale_active_runs_on_startup() {
+        let store = RunStore::in_memory().unwrap();
+        let running = store
+            .create_run(NewRun {
+                routine_id: "rtn_a".to_string(),
+                routine_title: "Routine".to_string(),
+                status: RunStatus::Running,
+                scheduled_for: None,
+                command: vec![],
+                cwd: "/tmp".to_string(),
+                cancel_reason: None,
+            })
+            .unwrap();
+
+        assert_eq!(store.cancel_active_runs_on_startup().unwrap(), 1);
+
+        let run = store.get_run(&running.id).unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert_eq!(run.cancel_reason.as_deref(), Some("app_restarted"));
+        assert!(run.finished_at.is_some());
     }
 }
