@@ -425,7 +425,7 @@ dd {
   color: var(--muted);
 }
 
-.routine-form input,
+.routine-form input:not([type="checkbox"]),
 .routine-form textarea,
 .routine-form select,
 #raw-config {
@@ -436,6 +436,34 @@ dd {
   border-radius: 7px;
   padding: 11px 12px;
   outline: 0;
+  color-scheme: dark;
+}
+
+.routine-form select {
+  appearance: none;
+  background-color: #191c19;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #c6ccc2 50%),
+    linear-gradient(135deg, #c6ccc2 50%, transparent 50%);
+  background-position:
+    calc(100% - 20px) 52%,
+    calc(100% - 13px) 52%;
+  background-repeat: no-repeat;
+  background-size: 7px 7px;
+  padding-right: 42px;
+}
+
+.routine-form select option {
+  color: var(--text);
+  background: #191c19;
+}
+
+.routine-form input:not([type="checkbox"]):focus,
+.routine-form textarea:focus,
+.routine-form select:focus,
+#raw-config:focus {
+  border-color: #687262;
+  box-shadow: 0 0 0 1px rgba(215, 247, 161, 0.12);
 }
 
 .routine-form textarea {
@@ -455,13 +483,32 @@ dd {
 
 .toggles {
   display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .toggles label {
-  display: flex;
+  width: fit-content;
+  min-height: 36px;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  color: #d8d4cb;
+  background: #181c18;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.routine-form input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #4b8fca;
+  flex: 0 0 auto;
 }
 
 .modal-backdrop {

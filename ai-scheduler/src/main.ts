@@ -365,6 +365,7 @@ function renderRoutineForm(routine: RoutineConfig) {
   const capability = capabilityFor(runner?.id ?? "");
   const models = capability?.models.length ? capability.models : runner?.model_options ?? [];
   const efforts = capability?.efforts.length ? capability.efforts : runner?.effort_options ?? [];
+  const timeoutSeconds = routine.timeout_seconds ?? config.settings.default_timeout_seconds;
   return `
     <form class="routine-form" id="routine-form">
       <div class="detail-toolbar">
@@ -381,12 +382,12 @@ function renderRoutineForm(routine: RoutineConfig) {
         <label>Effort<select name="effort"><option value="">—</option>${efforts.map((item) => optionHtml(item.value, item.label, routine.effort || runner?.default_effort)).join("")}</select></label>
         <label>Schedule<input name="schedule" value="${escapeHtml(routine.schedule)}" required /></label>
         <label>Timezone<input name="timezone" value="${escapeHtml(routine.timezone || config.settings.timezone)}" required /></label>
-        <label>Timeout seconds<input name="timeout_seconds" type="number" min="1" value="${routine.timeout_seconds ?? ""}" /></label>
+        <label>Timeout seconds<input name="timeout_seconds" type="number" min="1" value="${timeoutSeconds}" /></label>
       </div>
       <label>Working directory<input name="cwd" value="${escapeHtml(routine.cwd)}" required /></label>
       <div class="toggles">
         <label><input type="checkbox" name="paused" ${routine.paused ? "checked" : ""} /> Paused</label>
-        <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous mode</label>
+        <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Yolo</label>
       </div>
     </form>
   `;
@@ -426,7 +427,7 @@ function newRoutine(): RoutineConfig {
     timezone: config.settings.timezone,
     paused: true,
     dangerous: false,
-    timeout_seconds: null,
+    timeout_seconds: config.settings.default_timeout_seconds,
   };
 }
 
