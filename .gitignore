@@ -38,3 +38,6 @@ __pycache__/
 
 # Logs
 *.log
+
+# Local agent working notes
+_scratch/
