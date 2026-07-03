@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fs;
+use std::{env, fs};
 use std::path::{Path, PathBuf};
 
 use chrono_tz::Tz;
@@ -190,11 +190,12 @@ pub fn load_config_from_str(text: &str) -> Result<LoadedConfig, ConfigError> {
 
 pub fn load_raw_config_preserving_text(text: &str) -> Result<AppConfig, ConfigError> {
     let mut config: AppConfig = toml::from_str(text)?;
-    if normalize_config(&mut config) {
+    if normalize_routine_ids(&mut config) {
         return validation(
             "raw config save requires explicit, unique routine ids; use the form editor to generate ids before editing raw TOML",
         );
     }
+    normalize_routine_cwds(&mut config);
     validate_config(&config)?;
     Ok(config)
 }
@@ -220,6 +221,10 @@ pub fn save_config_text(path: impl AsRef<Path>, text: &str) -> Result<(), Config
 }
 
 pub fn normalize_config(config: &mut AppConfig) -> bool {
+    normalize_routine_ids(config) | normalize_routine_cwds(config)
+}
+
+fn normalize_routine_ids(config: &mut AppConfig) -> bool {
     let mut changed = false;
     let mut seen_ids = HashSet::new();
     for routine in &mut config.routines {
@@ -243,6 +248,28 @@ pub fn normalize_config(config: &mut AppConfig) -> bool {
         }
     }
     changed
+}
+
+fn normalize_routine_cwds(config: &mut AppConfig) -> bool {
+    let mut changed = false;
+    for routine in &mut config.routines {
+        if let Some(expanded) = expand_home_path(&routine.cwd) {
+            if expanded != routine.cwd {
+                routine.cwd = expanded;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn expand_home_path(path: &Path) -> Option<PathBuf> {
+    let value = path.to_str()?;
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    if value == "~" {
+        return Some(home);
+    }
+    value.strip_prefix("~/").map(|suffix| home.join(suffix))
 }
 
 pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
@@ -585,5 +612,42 @@ schedule = "0 7 * * Sat"
             .unwrap_err()
             .to_string();
         assert!(err.contains("explicit, unique routine ids"));
+    }
+
+    #[test]
+    fn expands_home_relative_cwd_before_validation() {
+        let home = tempfile::tempdir().unwrap();
+        let repos = home.path().join("repos");
+        fs::create_dir(&repos).unwrap();
+        let previous_home = env::var_os("HOME");
+        env::set_var("HOME", home.path());
+
+        let text = r#"
+[[runners]]
+id = "codex"
+label = "Codex"
+command = "codex"
+kind = "codex"
+args = ["exec", "{{prompt}}"]
+
+[[routines]]
+id = "rtn_manual"
+title = "Manual routine"
+prompt = "Do it."
+runner = "codex"
+model = "gpt-5.5"
+cwd = "~/repos"
+schedule = "0 7 * * Sat"
+"#;
+
+        let loaded = load_raw_config_preserving_text(text).unwrap();
+
+        assert_eq!(loaded.routines[0].cwd, repos);
+
+        if let Some(home) = previous_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
     }
 }

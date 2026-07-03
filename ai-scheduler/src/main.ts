@@ -100,6 +100,7 @@ type State = {
   mode: "details" | "edit" | "new";
   rawOpen: boolean;
   rawText: string;
+  formDraft?: RoutineConfig;
   error?: string;
   busy: boolean;
 };
@@ -234,13 +235,19 @@ function render() {
       </aside>
       <section class="detail">
         ${state.error ? `<div class="banner">${escapeHtml(state.error)}</div>` : ""}
-        ${routine ? renderDetail(routine, runner, capability) : renderEmptyDetail()}
+        ${renderDetailContent(routine, runner, capability)}
       </section>
       ${state.rawOpen ? renderRawPanel() : ""}
     </main>
   `;
 
   wireEvents();
+}
+
+function renderDetailContent(routine?: RoutineConfig, runner?: RunnerConfig, capability?: RunnerCapability) {
+  if (state.mode === "new") return renderRoutineForm(state.formDraft ?? newRoutine());
+  if (!routine) return renderEmptyDetail();
+  return renderDetail(routine, runner, capability);
 }
 
 function renderRoutineSection(title: string, routines: RoutineConfig[]) {
@@ -293,8 +300,7 @@ function renderRunnerStatus(runner: RunnerCapability) {
 }
 
 function renderDetail(routine: RoutineConfig, runner?: RunnerConfig, capability?: RunnerCapability) {
-  if (state.mode === "edit") return renderRoutineForm(routine);
-  if (state.mode === "new") return renderRoutineForm(newRoutine());
+  if (state.mode === "edit") return renderRoutineForm(state.formDraft ?? routine);
   const latest = state.runs[0];
   return `
     <div class="detail-toolbar">
@@ -458,7 +464,21 @@ function wireEvents() {
     });
   });
 
-  document.querySelector<HTMLFormElement>("#routine-form")?.addEventListener("submit", async (event) => {
+  const form = document.querySelector<HTMLFormElement>("#routine-form");
+  form?.addEventListener("input", () => {
+    state.formDraft = routineFromForm(form);
+  });
+  form?.addEventListener("change", (event) => {
+    const draft = routineFromForm(form);
+    if ((event.target as HTMLInputElement | HTMLSelectElement).name === "runner") {
+      applyRunnerDefaults(draft);
+      state.formDraft = draft;
+      render();
+      return;
+    }
+    state.formDraft = draft;
+  });
+  form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await saveRoutineFromForm(event.currentTarget as HTMLFormElement);
   });
@@ -468,12 +488,15 @@ async function handleAction(action: string, element: HTMLElement) {
   const routine = selectedRoutine();
   try {
     if (action === "new-routine") {
+      state.formDraft = newRoutine();
       state.mode = "new";
       render();
     } else if (action === "edit-routine") {
+      if (routine) state.formDraft = { ...routine };
       state.mode = "edit";
       render();
     } else if (action === "cancel-edit") {
+      state.formDraft = undefined;
       state.mode = "details";
       render();
     } else if (action === "toggle-pause") {
@@ -519,9 +542,30 @@ async function handleAction(action: string, element: HTMLElement) {
 }
 
 async function saveRoutineFromForm(form: HTMLFormElement) {
+  const routine = routineFromForm(form);
+  state.formDraft = routine;
+  const existingIds = new Set((state.snapshot?.config.routines ?? []).map((item) => item.id).filter(Boolean));
+
+  try {
+    const config = await invoke<AppConfig>("save_routine", { routine });
+    const savedId =
+      routine.id ||
+      config.routines.find((item) => item.id && !existingIds.has(item.id))?.id ||
+      state.selectedRoutineId;
+    state.selectedRoutineId = savedId ?? undefined;
+    state.formDraft = undefined;
+    state.mode = "details";
+    await loadSnapshot();
+  } catch (error) {
+    state.error = String(error);
+    render();
+  }
+}
+
+function routineFromForm(form: HTMLFormElement): RoutineConfig {
   const data = new FormData(form);
   const timeoutRaw = String(data.get("timeout_seconds") || "").trim();
-  const routine: RoutineConfig = {
+  return {
     id: String(data.get("id") || "") || null,
     title: String(data.get("title") || ""),
     description: String(data.get("description") || ""),
@@ -536,16 +580,12 @@ async function saveRoutineFromForm(form: HTMLFormElement) {
     dangerous: data.get("dangerous") === "on",
     timeout_seconds: timeoutRaw ? Number(timeoutRaw) : null,
   };
+}
 
-  try {
-    await invoke("save_routine", { routine });
-    state.mode = "details";
-    await loadSnapshot();
-    if (routine.id) state.selectedRoutineId = routine.id;
-  } catch (error) {
-    state.error = String(error);
-    render();
-  }
+function applyRunnerDefaults(routine: RoutineConfig) {
+  const runner = state.snapshot?.config.runners.find((item) => item.id === routine.runner);
+  routine.model = runner?.default_model ?? null;
+  routine.effort = runner?.default_effort ?? null;
 }
 
 function escapeHtml(value: unknown) {
