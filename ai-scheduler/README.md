@@ -2,10 +2,15 @@
 
 Local desktop scheduler for AI CLI routines. The app targets Arch/Linux first and uses Tauri v2 with a Rust backend and vanilla TypeScript/CSS frontend.
 
-## Commands
+## What It Does
+
+AI Scheduler runs saved local AI CLI routines while the desktop app is open. It does not install or configure the AI tools themselves; it assumes runner CLIs such as `codex`, `claude`, and `cursor-agent` are already installed, authenticated, and available on `PATH`.
+
+Routines can be paused, run manually, searched by title/description/prompt/working directory, and reviewed through their stored run history. Scheduled runs that were missed while the app was closed are recorded as missed and are not run late.
+
+## Install
 
 ```sh
-make test
 make install
 make install-local
 make update
@@ -19,4 +24,34 @@ make bootstrap-config
 - Config: `$XDG_CONFIG_HOME/ai-scheduler/config.toml`, fallback `~/.config/ai-scheduler/config.toml`
 - Runs DB: `$XDG_DATA_HOME/ai-scheduler/runs.db`, fallback `~/.local/share/ai-scheduler/runs.db`
 
-The app assumes runner CLIs such as `codex`, `claude`, and `cursor-agent` are already installed and authenticated on the machine.
+Run history is stored in SQLite and pruned by config. Defaults keep the last 25 runs per routine and remove terminal runs older than 90 days. Active `queued` and `running` rows are not pruned.
+
+## Config Model
+
+The TOML config contains:
+
+- `[settings]` for timezone, run retention, default timeout, and output cap
+- `[[runners]]` for CLI command templates
+- `[[routines]]` for scheduled work
+
+Built-in runner defaults cover Codex, Claude Code, and Cursor Agent. Each routine chooses a runner, model, optional effort value, working directory, cron schedule, timezone, timeout, and dangerous-mode toggle.
+
+Schedules use cron strings. Five-field cron strings are accepted and normalized to six-field cron with a leading seconds field.
+
+## Runtime Behavior
+
+- Routines run only while the app is open.
+- Paused routines do not run on schedule but can still be run manually.
+- If a scheduled run overlaps an older active run for the same routine, the older run is cancelled as superseded and the newer run starts.
+- Closing the app cancels active runs.
+- Timeouts and cancels target the child process group so spawned descendants are also terminated.
+- stdout and stderr are drained concurrently, stored separately, and capped per stream.
+
+## Development
+
+```sh
+make test
+make dev
+```
+
+`make test` runs Rust tests and the frontend production build. `make dev` starts the Tauri dev app.
