@@ -650,4 +650,31 @@ schedule = "0 7 * * Sat"
             env::remove_var("HOME");
         }
     }
+
+    #[test]
+    fn accepts_weekday_range_schedule_generated_by_form() {
+        let cwd = tempfile::tempdir().unwrap();
+        let text = format!(
+            r#"
+[[runners]]
+id = "codex"
+label = "Codex"
+command = "codex"
+kind = "codex"
+args = ["exec", "{{{{prompt}}}}"]
+
+[[routines]]
+id = "rtn_weekdays"
+title = "Weekday routine"
+prompt = "Do it."
+runner = "codex"
+model = "gpt-5.5"
+cwd = "{}"
+schedule = "0 9 * * Mon-Fri"
+"#,
+            cwd.path().display()
+        );
+
+        load_config_from_str(&text).unwrap();
+    }
 }

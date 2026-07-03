@@ -369,10 +369,17 @@ dd {
 
 .run summary {
   display: grid;
-  grid-template-columns: 130px 160px 1fr;
+  grid-template-columns: 130px 160px 1fr auto;
+  align-items: center;
   gap: 16px;
   cursor: pointer;
   color: #d9ded6;
+}
+
+.copy-run {
+  min-width: 104px;
+  justify-self: end;
+  white-space: nowrap;
 }
 
 .status {
@@ -479,6 +486,10 @@ dd {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.custom-schedule {
+  grid-column: span 2;
 }
 
 .toggles {

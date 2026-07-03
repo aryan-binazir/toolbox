@@ -101,8 +101,20 @@ type State = {
   rawOpen: boolean;
   rawText: string;
   formDraft?: RoutineConfig;
+  openRunIds: Set<string>;
+  copiedRunId?: string;
   error?: string;
+  errorTimer?: number;
   busy: boolean;
+};
+
+type RenderOptions = {
+  preserveScroll?: boolean;
+};
+
+type ScrollSnapshot = {
+  detailTop: number;
+  sidebarTop: number;
 };
 
 const state: State = {
@@ -111,13 +123,27 @@ const state: State = {
   mode: "details",
   rawOpen: false,
   rawText: "",
+  openRunIds: new Set(),
   busy: false,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const CUSTOM_SCHEDULE_VALUE = "__custom__";
+const DAY_OPTIONS: OptionValue[] = [
+  { value: "*", label: "Every day" },
+  { value: "Mon-Fri", label: "Weekdays" },
+  { value: "Mon", label: "Monday" },
+  { value: "Tue", label: "Tuesday" },
+  { value: "Wed", label: "Wednesday" },
+  { value: "Thu", label: "Thursday" },
+  { value: "Fri", label: "Friday" },
+  { value: "Sat", label: "Saturday" },
+  { value: "Sun", label: "Sunday" },
+];
+const TIME_OPTIONS = buildTimeOptions();
 
-async function loadSnapshot(keepSelection = true) {
-  state.error = undefined;
+async function loadSnapshot(keepSelection = true, renderOptions: RenderOptions = {}) {
+  clearError();
   try {
     state.snapshot = await invoke<Snapshot>("get_snapshot");
     const routines = state.snapshot.config.routines;
@@ -126,9 +152,27 @@ async function loadSnapshot(keepSelection = true) {
     }
     await loadRuns();
   } catch (error) {
-    state.error = String(error);
+    setError(error);
   }
-  render();
+  render(renderOptions);
+}
+
+function clearError() {
+  state.error = undefined;
+  if (state.errorTimer) {
+    window.clearTimeout(state.errorTimer);
+    state.errorTimer = undefined;
+  }
+}
+
+function setError(error: unknown) {
+  state.error = String(error);
+  if (state.errorTimer) window.clearTimeout(state.errorTimer);
+  state.errorTimer = window.setTimeout(() => {
+    state.error = undefined;
+    state.errorTimer = undefined;
+    render({ preserveScroll: true });
+  }, 8_000);
 }
 
 async function loadRuns() {
@@ -171,7 +215,13 @@ function projectLabel(cwd: string) {
 
 function scheduleLabel(routine: RoutineConfig) {
   const timezone = routine.timezone || state.snapshot?.config.settings.timezone || "UTC";
-  return `${routine.schedule} · ${timezone}`;
+  return `${friendlySchedule(routine.schedule)} · ${timezone}`;
+}
+
+function friendlySchedule(schedule: string) {
+  const parsed = parseSimpleSchedule(schedule);
+  if (!parsed) return schedule;
+  return `${dayLabel(parsed.day)} at ${timeLabel(parsed.time)}`;
 }
 
 function statusClass(status: RunStatus) {
@@ -188,12 +238,14 @@ function formatDate(value?: string | null) {
   }).format(new Date(value));
 }
 
-function render() {
+function render(options: RenderOptions = {}) {
   const snapshot = state.snapshot;
   if (!snapshot) {
     app.innerHTML = `<main class="shell"><div class="empty">Loading</div></main>`;
     return;
   }
+
+  const scrollSnapshot = options.preserveScroll ? captureScrollSnapshot() : undefined;
 
   const current = filteredRoutines(false);
   const paused = filteredRoutines(true);
@@ -242,6 +294,22 @@ function render() {
   `;
 
   wireEvents();
+  restoreScrollSnapshot(scrollSnapshot);
+}
+
+function captureScrollSnapshot(): ScrollSnapshot {
+  return {
+    detailTop: document.querySelector<HTMLElement>(".detail")?.scrollTop ?? 0,
+    sidebarTop: document.querySelector<HTMLElement>(".sidebar")?.scrollTop ?? 0,
+  };
+}
+
+function restoreScrollSnapshot(snapshot?: ScrollSnapshot) {
+  if (!snapshot) return;
+  const detail = document.querySelector<HTMLElement>(".detail");
+  const sidebar = document.querySelector<HTMLElement>(".sidebar");
+  if (detail) detail.scrollTop = snapshot.detailTop;
+  if (sidebar) sidebar.scrollTop = snapshot.sidebarTop;
 }
 
 function renderDetailContent(routine?: RoutineConfig, runner?: RunnerConfig, capability?: RunnerCapability) {
@@ -333,12 +401,16 @@ function renderDetail(routine: RoutineConfig, runner?: RunnerConfig, capability?
 }
 
 function renderRun(run: RunRecord) {
+  const runId = escapeHtml(run.id);
+  const copyPayload = copyPayloadForRun(run);
+  const copyLabel = state.copiedRunId === run.id ? "Copied" : copyPayload.label;
   return `
-    <details class="run">
+    <details class="run" data-run-id="${runId}" ${state.openRunIds.has(run.id) ? "open" : ""}>
       <summary>
         <span class="${statusClass(run.status)}">${run.status.replace("_", " ")}</span>
         <span>${formatDate(run.started_at || run.scheduled_for)}</span>
         <span>${escapeHtml(run.cancel_reason || "")}</span>
+        <button class="copy-run" data-action="copy-run" data-run-id="${runId}" title="${escapeHtml(copyPayload.title)}">${escapeHtml(copyLabel)}</button>
       </summary>
       <div class="run-body">
         <div class="command">${escapeHtml(run.command.join(" "))}</div>
@@ -372,6 +444,7 @@ function renderRoutineForm(routine: RoutineConfig) {
   const models = capability?.models.length ? capability.models : runner?.model_options ?? [];
   const efforts = capability?.efforts.length ? capability.efforts : runner?.effort_options ?? [];
   const timeoutSeconds = routine.timeout_seconds ?? config.settings.default_timeout_seconds;
+  const schedule = parseScheduleControls(routine.schedule);
   return `
     <form class="routine-form" id="routine-form">
       <div class="detail-toolbar">
@@ -386,7 +459,12 @@ function renderRoutineForm(routine: RoutineConfig) {
         <label>Runner<select name="runner">${config.runners.map((item) => optionHtml(item.id, item.label, routine.runner)).join("")}</select></label>
         <label>Model<select name="model">${models.map((item) => optionHtml(item.value, item.label, routine.model || runner?.default_model)).join("")}</select></label>
         <label>Effort<select name="effort"><option value="">—</option>${efforts.map((item) => optionHtml(item.value, item.label, routine.effort || runner?.default_effort)).join("")}</select></label>
-        <label>Schedule<input name="schedule" value="${escapeHtml(routine.schedule)}" required /></label>
+        <label>Day<select name="schedule_day">${DAY_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.day)).join("")}${optionHtml(CUSTOM_SCHEDULE_VALUE, "Custom cron", schedule.day)}</select></label>
+        ${
+          schedule.day === CUSTOM_SCHEDULE_VALUE
+            ? `<label class="custom-schedule">Cron<input name="schedule_custom" value="${escapeHtml(schedule.custom)}" required /></label>`
+            : `<label>Time<select name="schedule_time">${TIME_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.time)).join("")}</select></label>`
+        }
         <label>Timezone<input name="timezone" value="${escapeHtml(routine.timezone || config.settings.timezone)}" required /></label>
         <label>Timeout seconds<input name="timeout_seconds" type="number" min="1" value="${timeoutSeconds}" /></label>
       </div>
@@ -441,6 +519,61 @@ function optionHtml(value: string, label: string, selected?: string | null) {
   return `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>`;
 }
 
+function buildTimeOptions() {
+  const options: OptionValue[] = [];
+  for (let hour = 0; hour < 24; hour += 1) {
+    for (let minute = 0; minute < 60; minute += 5) {
+      const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      options.push({ value, label: timeLabel(value) });
+    }
+  }
+  return options;
+}
+
+function parseScheduleControls(schedule: string) {
+  const parsed = parseSimpleSchedule(schedule);
+  if (parsed) return { ...parsed, custom: "" };
+  return { day: CUSTOM_SCHEDULE_VALUE, time: "07:00", custom: schedule };
+}
+
+function parseSimpleSchedule(schedule: string) {
+  const fields = schedule.trim().split(/\s+/).filter(Boolean);
+  const cron = fields.length === 6 && fields[0] === "0" ? fields.slice(1) : fields;
+  if (cron.length !== 5) return undefined;
+
+  const [minute, hour, dayOfMonth, month, day] = cron;
+  if (dayOfMonth !== "*" || month !== "*") return undefined;
+  if (!DAY_OPTIONS.some((option) => option.value === day)) return undefined;
+
+  const hourNumber = Number(hour);
+  const minuteNumber = Number(minute);
+  if (!Number.isInteger(hourNumber) || !Number.isInteger(minuteNumber)) return undefined;
+  if (hourNumber < 0 || hourNumber > 23 || minuteNumber < 0 || minuteNumber > 59) return undefined;
+  if (minuteNumber % 5 !== 0) return undefined;
+
+  return {
+    day,
+    time: `${String(hourNumber).padStart(2, "0")}:${String(minuteNumber).padStart(2, "0")}`,
+  };
+}
+
+function buildSimpleSchedule(day: string, time: string) {
+  const [hour = "7", minute = "0"] = time.split(":");
+  return `${Number(minute)} ${Number(hour)} * * ${day}`;
+}
+
+function dayLabel(day: string) {
+  return DAY_OPTIONS.find((option) => option.value === day)?.label ?? day;
+}
+
+function timeLabel(value: string) {
+  const [hourRaw = "0", minute = "00"] = value.split(":");
+  const hour = Number(hourRaw);
+  const displayHour = hour % 12 || 12;
+  const period = hour < 12 ? "AM" : "PM";
+  return `${displayHour}:${minute.padStart(2, "0")} ${period}`;
+}
+
 function wireEvents() {
   document.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => {
     state.query = (event.currentTarget as HTMLInputElement).value;
@@ -452,6 +585,7 @@ function wireEvents() {
       if ((event.target as HTMLElement).closest("[data-action='toggle-pause']")) return;
       state.selectedRoutineId = row.dataset.routineId;
       state.mode = "details";
+      state.openRunIds.clear();
       await loadRuns();
       render();
     });
@@ -460,7 +594,20 @@ function wireEvents() {
   document.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => {
     element.addEventListener("click", async (event) => {
       event.preventDefault();
+      event.stopPropagation();
       await handleAction((event.currentTarget as HTMLElement).dataset.action!, event.currentTarget as HTMLElement);
+    });
+  });
+
+  document.querySelectorAll<HTMLDetailsElement>("details.run").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      const runId = details.dataset.runId;
+      if (!runId) return;
+      if (details.open) {
+        state.openRunIds.add(runId);
+      } else {
+        state.openRunIds.delete(runId);
+      }
     });
   });
 
@@ -472,6 +619,12 @@ function wireEvents() {
     const draft = routineFromForm(form);
     if ((event.target as HTMLInputElement | HTMLSelectElement).name === "runner") {
       applyRunnerDefaults(draft);
+      state.formDraft = draft;
+      render();
+      return;
+    }
+    if ((event.target as HTMLInputElement | HTMLSelectElement).name === "schedule_day") {
+      if (!draft.schedule) draft.schedule = state.formDraft?.schedule || selectedRoutine()?.schedule || "0 7 * * Sat";
       state.formDraft = draft;
       render();
       return;
@@ -534,10 +687,22 @@ async function handleAction(action: string, element: HTMLElement) {
     } else if (action === "refresh-runners") {
       await invoke("refresh_runner_capabilities");
       await loadSnapshot();
+    } else if (action === "copy-run") {
+      const run = state.runs.find((item) => item.id === element.dataset.runId);
+      if (!run) return;
+      await copyText(copyPayloadForRun(run).text);
+      state.copiedRunId = run.id;
+      render({ preserveScroll: true });
+      window.setTimeout(() => {
+        if (state.copiedRunId === run.id) {
+          state.copiedRunId = undefined;
+          render({ preserveScroll: true });
+        }
+      }, 1_500);
     }
   } catch (error) {
-    state.error = String(error);
-    render();
+    setError(error);
+    render({ preserveScroll: true });
   }
 }
 
@@ -557,14 +722,22 @@ async function saveRoutineFromForm(form: HTMLFormElement) {
     state.mode = "details";
     await loadSnapshot();
   } catch (error) {
-    state.error = String(error);
-    render();
+    setError(error);
+    render({ preserveScroll: true });
   }
 }
 
 function routineFromForm(form: HTMLFormElement): RoutineConfig {
   const data = new FormData(form);
   const timeoutRaw = String(data.get("timeout_seconds") || "").trim();
+  const scheduleDay = String(data.get("schedule_day") || "");
+  const scheduleTime = String(data.get("schedule_time") || "");
+  const currentSchedule = state.formDraft?.schedule || selectedRoutine()?.schedule || "0 7 * * Sat";
+  const currentControls = parseScheduleControls(currentSchedule);
+  const schedule =
+    scheduleDay && scheduleDay !== CUSTOM_SCHEDULE_VALUE
+      ? buildSimpleSchedule(scheduleDay, scheduleTime || currentControls.time)
+      : String(data.get("schedule_custom") || currentSchedule);
   return {
     id: String(data.get("id") || "") || null,
     title: String(data.get("title") || ""),
@@ -574,7 +747,7 @@ function routineFromForm(form: HTMLFormElement): RoutineConfig {
     model: String(data.get("model") || "") || null,
     effort: String(data.get("effort") || "") || null,
     cwd: String(data.get("cwd") || ""),
-    schedule: String(data.get("schedule") || ""),
+    schedule,
     timezone: String(data.get("timezone") || "") || null,
     paused: data.get("paused") === "on",
     dangerous: data.get("dangerous") === "on",
@@ -588,6 +761,84 @@ function applyRunnerDefaults(routine: RoutineConfig) {
   routine.effort = runner?.default_effort ?? null;
 }
 
+function copyPayloadForRun(run: RunRecord) {
+  const commandName = commandBasename(run.command[0] || "");
+  const output = `${run.stderr}\n${run.stdout}`;
+  const sessionId = extractSessionId(output);
+  const chatId = extractChatId(output);
+  const cwdPrefix = run.cwd ? `cd ${shellQuote(run.cwd)} && ` : "";
+
+  if (commandName === "codex" && sessionId) {
+    return {
+      label: "Copy resume",
+      title: "Copy Codex resume command",
+      text: `${cwdPrefix}codex resume --include-non-interactive ${shellQuote(sessionId)}`,
+    };
+  }
+
+  if (commandName === "claude" && sessionId) {
+    return {
+      label: "Copy resume",
+      title: "Copy Claude resume command",
+      text: `${cwdPrefix}claude --resume ${shellQuote(sessionId)}`,
+    };
+  }
+
+  if ((commandName === "cursor-agent" || commandName === "agent") && chatId) {
+    const command = run.command[0] || "cursor-agent";
+    return {
+      label: "Copy resume",
+      title: "Copy Cursor Agent resume command",
+      text: `${cwdPrefix}${shellQuote(command)} --resume ${shellQuote(chatId)}`,
+    };
+  }
+
+  return {
+    label: "Copy command",
+    title: "Copy original run command",
+    text: `${cwdPrefix}${shellJoin(run.command)}`,
+  };
+}
+
+function extractSessionId(output: string) {
+  return output.match(/session[\s_-]*id["'\s:=]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1];
+}
+
+function extractChatId(output: string) {
+  return output.match(/chat[\s_-]*id["'\s:=]+([A-Za-z0-9_-]+)/i)?.[1];
+}
+
+function commandBasename(command: string) {
+  return command.split("/").filter(Boolean).at(-1) ?? command;
+}
+
+function shellJoin(args: string[]) {
+  return args.map(shellQuote).join(" ");
+}
+
+function shellQuote(value: string) {
+  if (/^[A-Za-z0-9_/:.,@%+=-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("clipboard copy failed");
+}
+
 function escapeHtml(value: unknown) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -597,15 +848,15 @@ function escapeHtml(value: unknown) {
 }
 
 loadSnapshot(false);
-setTimeout(() => loadSnapshot(), 1_000);
-setTimeout(() => loadSnapshot(), 8_000);
+setTimeout(() => loadSnapshot(true, { preserveScroll: true }), 1_000);
+setTimeout(() => loadSnapshot(true, { preserveScroll: true }), 8_000);
 setInterval(() => {
   if (!state.rawOpen && state.mode === "details") {
     loadRuns()
-      .then(render)
+      .then(() => render({ preserveScroll: true }))
       .catch((error) => {
-        state.error = String(error);
-        render();
+        setError(error);
+        render({ preserveScroll: true });
       });
   }
 }, 3_000);
