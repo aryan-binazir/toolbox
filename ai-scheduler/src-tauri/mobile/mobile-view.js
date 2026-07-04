@@ -130,7 +130,7 @@ function renderListPage(state) {
           <h1>AI Scheduler</h1>
           <p>${state.snapshot.routines.length} routines</p>
         </div>
-        <button class="icon-button" data-action="new-routine" title="New routine">+</button>
+        <button class="icon-button add-button" data-action="new-routine" title="New routine" aria-label="New routine">+</button>
       </header>
       ${state.error ? `<div class="alert">${escapeHtml(state.error)}</div>` : ""}
       <label class="search">
@@ -317,15 +317,15 @@ function renderRoutineForm(routine, state) {
   return `
     <form id="routine-form" class="routine-form">
       <input type="hidden" name="id" value="${escapeAttribute(routine.id || "")}" />
-      <label>Title<input name="title" value="${escapeAttribute(routine.title || "")}" required /></label>
-      <label>Description<textarea name="description">${escapeHtml(routine.description || "")}</textarea></label>
-      <label>Prompt<textarea class="prompt-input" name="prompt" required>${escapeHtml(routine.prompt || "")}</textarea></label>
+      <label class="form-title">Title<input name="title" value="${escapeAttribute(routine.title || "")}" required /></label>
+      <label class="form-description">Description<textarea name="description">${escapeHtml(routine.description || "")}</textarea></label>
+      <label class="form-prompt">Prompt<textarea class="prompt-input" name="prompt" required>${escapeHtml(routine.prompt || "")}</textarea></label>
       <div class="form-grid">
         <label>Runner<select name="runner">${(state.snapshot?.runners || []).map((item) => optionHtml(item.id, item.label, routine.runner_id)).join("")}</select></label>
         <label>Model<select name="model">${models.map((item) => optionHtml(item.value, item.label, routine.model)).join("")}</select></label>
         <label>Effort<select name="effort">${efforts.length ? efforts.map((item) => optionHtml(item.value, item.label, routine.effort)).join("") : `<option value="">None</option>`}</select></label>
       </div>
-      <label>Working directory<input name="cwd" value="${escapeAttribute(routine.cwd || "")}" required /></label>
+      <label class="form-cwd">Working directory<input name="cwd" value="${escapeAttribute(routine.cwd || "")}" required /></label>
       <div class="form-grid">
         ${renderScheduleDayControls(schedule)}
         ${

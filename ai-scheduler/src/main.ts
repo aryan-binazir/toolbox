@@ -431,7 +431,7 @@ function renderRoutineSection(title: string, routines: RoutineConfig[]) {
     <section class="routine-section">
       <div class="section-head">
         <h2>${title}</h2>
-        ${title === "Current" ? `<button class="icon-button" data-action="new-routine" title="New routine">+</button>` : ""}
+        ${title === "Current" ? `<button class="icon-button add-button" data-action="new-routine" title="New routine" aria-label="New routine">+</button>` : ""}
       </div>
       <div class="routine-list">
         ${
