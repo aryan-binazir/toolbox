@@ -4,7 +4,7 @@ use std::path::Path;
 use std::thread;
 
 use axum::extract::{Path as RoutePath, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,6 +21,7 @@ use crate::{AppError, AppState};
 const INDEX_HTML: &str = include_str!("../mobile/index.html");
 const MOBILE_CSS: &str = include_str!("../mobile/mobile.css");
 const MOBILE_JS: &str = include_str!("../mobile/mobile.js");
+const ASSET_VERSION: &str = "20260704-a59e5ad-mobile-panel";
 const MUTATION_HEADER: &str = "x-ai-scheduler-mobile";
 const MUTATION_HEADER_VALUE: &str = "1";
 const OUTPUT_PREVIEW_BYTES: usize = 6 * 1024;
@@ -233,28 +234,37 @@ async fn serve(
 }
 
 async fn index() -> impl IntoResponse {
-    Html(INDEX_HTML)
+    (
+        no_store_headers("text/html; charset=utf-8"),
+        Html(INDEX_HTML.replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)),
+    )
 }
 
 async fn styles() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        MOBILE_CSS,
-    )
+    (no_store_headers("text/css; charset=utf-8"), MOBILE_CSS)
 }
 
 async fn script() -> impl IntoResponse {
     (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
+        no_store_headers("application/javascript; charset=utf-8"),
         MOBILE_JS,
     )
 }
 
 async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "not found")
+}
+
+fn no_store_headers(content_type: &'static str) -> [(HeaderName, &'static str); 4] {
+    [
+        (header::CONTENT_TYPE, content_type),
+        (
+            header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, max-age=0",
+        ),
+        (header::PRAGMA, "no-cache"),
+        (header::EXPIRES, "0"),
+    ]
 }
 
 async fn api_snapshot(
