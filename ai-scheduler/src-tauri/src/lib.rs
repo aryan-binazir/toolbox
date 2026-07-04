@@ -1,4 +1,5 @@
 pub mod config;
+pub mod mobile;
 pub mod paths;
 pub mod process;
 pub mod runners;
@@ -53,6 +54,7 @@ pub struct AppState {
     config: Arc<Mutex<AppConfig>>,
     runner_capabilities: Arc<Mutex<Vec<RunnerCapability>>>,
     process_manager: process::ProcessManager,
+    mobile_server: Arc<Mutex<Option<mobile::MobileServerHandle>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +87,7 @@ impl AppState {
             config: Arc::new(Mutex::new(loaded.config)),
             runner_capabilities: Arc::new(Mutex::new(runner_capabilities)),
             process_manager: process::ProcessManager::default(),
+            mobile_server: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -123,6 +126,148 @@ impl AppState {
         capabilities
     }
 
+    pub fn snapshot(&self) -> Result<AppSnapshot, AppError> {
+        let config = self.config();
+        let scheduler_last_checked = self.store.scheduler_last_checked()?;
+        let routine_schedules = scheduler::routine_schedule_infos(&config, Utc::now());
+        Ok(AppSnapshot {
+            config_path: self.paths.config_file.clone(),
+            db_path: self.paths.db_file.clone(),
+            config,
+            runner_capabilities: self.runner_capabilities(),
+            scheduler_last_checked,
+            routine_schedules,
+        })
+    }
+
+    pub fn raw_config(&self) -> Result<String, AppError> {
+        Ok(fs::read_to_string(&self.paths.config_file)?)
+    }
+
+    pub fn save_raw_config(&self, raw: String) -> Result<AppConfig, AppError> {
+        let config = load_raw_config_preserving_text(&raw)?;
+        save_config_text(&self.paths.config_file, &raw)?;
+        self.set_config(config.clone());
+        Ok(config)
+    }
+
+    pub fn preview_schedule(&self, routine: &RoutineConfig) -> SchedulePreview {
+        scheduler::preview_schedule(&self.config(), routine, Utc::now())
+    }
+
+    pub fn list_runs(&self, routine_id: &str) -> Result<Vec<RunRecord>, AppError> {
+        self.store
+            .list_runs_for_routine(routine_id)
+            .map_err(Into::into)
+    }
+
+    pub fn save_routine(&self, routine: RoutineConfig) -> Result<AppConfig, AppError> {
+        let mut config = self.config();
+        let incoming = routine;
+        let incoming_id = incoming.id.clone();
+        if let Some(id) = incoming_id.as_deref() {
+            if let Some(existing) = config
+                .routines
+                .iter_mut()
+                .find(|routine| routine.id.as_deref() == Some(id))
+            {
+                *existing = incoming;
+            } else {
+                config.routines.push(incoming);
+            }
+        } else {
+            config.routines.push(incoming);
+        }
+        normalize_config(&mut config);
+        self.replace_config(config.clone())?;
+        Ok(config)
+    }
+
+    pub fn set_routine_paused(
+        &self,
+        routine_id: &str,
+        paused: bool,
+    ) -> Result<AppConfig, AppError> {
+        let mut config = self.config();
+        let routine = config
+            .routines
+            .iter_mut()
+            .find(|routine| routine.id.as_deref() == Some(routine_id))
+            .ok_or_else(|| AppError::Message(format!("routine `{routine_id}` not found")))?;
+        routine.paused = paused;
+        self.replace_config(config.clone())?;
+        Ok(config)
+    }
+
+    pub fn delete_routine(&self, routine_id: &str) -> Result<AppConfig, AppError> {
+        let mut config = self.config();
+        let existed = config
+            .routines
+            .iter()
+            .any(|routine| routine.id.as_deref() == Some(routine_id));
+        config
+            .routines
+            .retain(|routine| routine.id.as_deref() != Some(routine_id));
+        self.replace_config(config.clone())?;
+        if existed {
+            self.process_manager()
+                .cancel_routine(routine_id, process::CancelReason::User);
+            self.store.delete_runs_for_routine(routine_id)?;
+        }
+        Ok(config)
+    }
+
+    pub fn run_routine(&self, routine_id: &str) -> Result<RunRecord, AppError> {
+        let config = self.config();
+        let routine = config
+            .routines
+            .iter()
+            .find(|routine| routine.id.as_deref() == Some(routine_id))
+            .cloned()
+            .ok_or_else(|| AppError::Message(format!("routine `{routine_id}` not found")))?;
+        let runner = config
+            .runners
+            .iter()
+            .find(|runner| runner.id == routine.runner)
+            .cloned()
+            .ok_or_else(|| AppError::Message(format!("runner `{}` not found", routine.runner)))?;
+        self.process_manager()
+            .start_manual_run(self.store(), config.settings.clone(), runner, routine)
+            .map_err(Into::into)
+    }
+
+    pub fn cancel_routine(&self, routine_id: &str) -> Option<String> {
+        self.process_manager()
+            .cancel_routine(routine_id, process::CancelReason::User)
+    }
+
+    pub fn reconcile_mobile_server(&self) {
+        let settings = self.config().settings;
+        let mut current = self.mobile_server.lock().expect("mobile lock poisoned");
+        if !settings.mobile_web_enabled {
+            if let Some(handle) = current.take() {
+                handle.stop();
+                eprintln!("AI Scheduler mobile web disabled");
+            }
+            return;
+        }
+
+        if current
+            .as_ref()
+            .is_some_and(|handle| handle.port() == settings.mobile_web_port)
+        {
+            return;
+        }
+
+        if let Some(handle) = current.take() {
+            handle.stop();
+        }
+        *current = Some(mobile::start_mobile_server(
+            self.clone(),
+            settings.mobile_web_port,
+        ));
+    }
+
     fn set_config(&self, config: AppConfig) {
         let mut current = self.config.lock().expect("config lock poisoned");
         let runners_changed = current.runners != config.runners;
@@ -135,6 +280,7 @@ impl AppState {
                 .expect("runner capability lock poisoned") =
                 configured_runner_capabilities(&config.runners);
         }
+        self.reconcile_mobile_server();
     }
 }
 
@@ -152,17 +298,7 @@ fn ensure_config_exists(path: &PathBuf) -> Result<(), AppError> {
 
 #[tauri::command]
 async fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, AppError> {
-    let config = state.config();
-    let scheduler_last_checked = state.store.scheduler_last_checked()?;
-    let routine_schedules = scheduler::routine_schedule_infos(&config, Utc::now());
-    Ok(AppSnapshot {
-        config_path: state.paths.config_file.clone(),
-        db_path: state.paths.db_file.clone(),
-        config,
-        runner_capabilities: state.runner_capabilities(),
-        scheduler_last_checked,
-        routine_schedules,
-    })
+    state.snapshot()
 }
 
 #[tauri::command]
@@ -174,7 +310,7 @@ async fn refresh_runner_capabilities(
 
 #[tauri::command]
 async fn get_raw_config(state: tauri::State<'_, AppState>) -> Result<String, AppError> {
-    Ok(fs::read_to_string(&state.paths.config_file)?)
+    state.raw_config()
 }
 
 #[tauri::command]
@@ -182,10 +318,7 @@ async fn save_raw_config(
     state: tauri::State<'_, AppState>,
     raw: String,
 ) -> Result<AppConfig, AppError> {
-    let config = load_raw_config_preserving_text(&raw)?;
-    save_config_text(&state.paths.config_file, &raw)?;
-    state.set_config(config.clone());
-    Ok(config)
+    state.save_raw_config(raw)
 }
 
 #[tauri::command]
@@ -193,11 +326,7 @@ async fn preview_schedule(
     state: tauri::State<'_, AppState>,
     routine: RoutineConfig,
 ) -> Result<SchedulePreview, AppError> {
-    Ok(scheduler::preview_schedule(
-        &state.config(),
-        &routine,
-        Utc::now(),
-    ))
+    Ok(state.preview_schedule(&routine))
 }
 
 #[tauri::command]
@@ -217,10 +346,7 @@ async fn list_runs(
     state: tauri::State<'_, AppState>,
     routine_id: String,
 ) -> Result<Vec<RunRecord>, AppError> {
-    state
-        .store
-        .list_runs_for_routine(&routine_id)
-        .map_err(Into::into)
+    state.list_runs(&routine_id)
 }
 
 #[tauri::command]
@@ -228,25 +354,7 @@ async fn save_routine(
     state: tauri::State<'_, AppState>,
     routine: RoutineConfig,
 ) -> Result<AppConfig, AppError> {
-    let mut config = state.config();
-    let incoming = routine;
-    let incoming_id = incoming.id.clone();
-    if let Some(id) = incoming_id.as_deref() {
-        if let Some(existing) = config
-            .routines
-            .iter_mut()
-            .find(|routine| routine.id.as_deref() == Some(id))
-        {
-            *existing = incoming;
-        } else {
-            config.routines.push(incoming);
-        }
-    } else {
-        config.routines.push(incoming);
-    }
-    normalize_config(&mut config);
-    state.replace_config(config.clone())?;
-    Ok(config)
+    state.save_routine(routine)
 }
 
 #[tauri::command]
@@ -255,15 +363,7 @@ async fn set_routine_paused(
     routine_id: String,
     paused: bool,
 ) -> Result<AppConfig, AppError> {
-    let mut config = state.config();
-    let routine = config
-        .routines
-        .iter_mut()
-        .find(|routine| routine.id.as_deref() == Some(routine_id.as_str()))
-        .ok_or_else(|| AppError::Message(format!("routine `{routine_id}` not found")))?;
-    routine.paused = paused;
-    state.replace_config(config.clone())?;
-    Ok(config)
+    state.set_routine_paused(&routine_id, paused)
 }
 
 #[tauri::command]
@@ -271,22 +371,7 @@ async fn delete_routine(
     state: tauri::State<'_, AppState>,
     routine_id: String,
 ) -> Result<AppConfig, AppError> {
-    let mut config = state.config();
-    let existed = config
-        .routines
-        .iter()
-        .any(|routine| routine.id.as_deref() == Some(routine_id.as_str()));
-    config
-        .routines
-        .retain(|routine| routine.id.as_deref() != Some(routine_id.as_str()));
-    state.replace_config(config.clone())?;
-    if existed {
-        state
-            .process_manager()
-            .cancel_routine(&routine_id, process::CancelReason::User);
-        state.store.delete_runs_for_routine(&routine_id)?;
-    }
-    Ok(config)
+    state.delete_routine(&routine_id)
 }
 
 #[tauri::command]
@@ -294,24 +379,7 @@ async fn run_routine(
     state: tauri::State<'_, AppState>,
     routine_id: String,
 ) -> Result<RunRecord, AppError> {
-    let config = state.config();
-    let routine = config
-        .routines
-        .iter()
-        .find(|routine| routine.id.as_deref() == Some(routine_id.as_str()))
-        .cloned()
-        .ok_or_else(|| AppError::Message(format!("routine `{routine_id}` not found")))?;
-    let runner = config
-        .runners
-        .iter()
-        .find(|runner| runner.id == routine.runner)
-        .cloned()
-        .ok_or_else(|| AppError::Message(format!("runner `{}` not found", routine.runner)))?;
-    let store = state.store();
-    state
-        .process_manager()
-        .start_manual_run(store, config.settings.clone(), runner, routine)
-        .map_err(Into::into)
+    state.run_routine(&routine_id)
 }
 
 #[tauri::command]
@@ -319,14 +387,63 @@ async fn cancel_routine(
     state: tauri::State<'_, AppState>,
     routine_id: String,
 ) -> Result<Option<String>, AppError> {
-    Ok(state
-        .process_manager()
-        .cancel_routine(&routine_id, process::CancelReason::User))
+    Ok(state.cancel_routine(&routine_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths(temp: &tempfile::TempDir) -> AppPaths {
+        AppPaths {
+            config_file: temp.path().join("config.toml"),
+            data_dir: temp.path().join("data"),
+            db_file: temp.path().join("runs.db"),
+            state_dir: temp.path().join("state"),
+        }
+    }
+
+    fn available_port() -> u16 {
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn mobile_server_is_disabled_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+
+        state.reconcile_mobile_server();
+
+        assert!(state.mobile_server.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn disabling_mobile_web_config_clears_server_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+        let mut config = state.config();
+        config.settings.mobile_web_enabled = true;
+        config.settings.mobile_web_port = available_port();
+        state.set_config(config);
+
+        assert!(state.mobile_server.lock().unwrap().is_some());
+
+        let mut config = state.config();
+        config.settings.mobile_web_enabled = false;
+        state.set_config(config);
+
+        assert!(state.mobile_server.lock().unwrap().is_none());
+    }
 }
 
 pub fn run() {
     let paths = AppPaths::discover();
     let state = AppState::bootstrap(paths).expect("failed to bootstrap app state");
+    state.reconcile_mobile_server();
     let setup_state = state.clone();
     let close_process_manager = state.process_manager();
 

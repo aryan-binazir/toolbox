@@ -4,6 +4,8 @@ max_runs_per_routine = 25
 max_run_age_days = 90
 default_timeout_seconds = 1800
 stream_cap_bytes = 5242880
+mobile_web_enabled = false
+mobile_web_port = 6882
 
 [[runners]]
 id = "codex"

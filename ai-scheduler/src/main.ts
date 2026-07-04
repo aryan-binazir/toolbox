@@ -135,6 +135,12 @@ type RenderOptions = {
 type ScrollSnapshot = {
   detailTop: number;
   sidebarTop: number;
+  runOutputPositions: {
+    runId: string;
+    stream: "stdout" | "stderr";
+    top: number;
+    left: number;
+  }[];
 };
 
 const state: State = {
@@ -343,6 +349,14 @@ function captureScrollSnapshot(): ScrollSnapshot {
   return {
     detailTop: document.querySelector<HTMLElement>(".detail")?.scrollTop ?? 0,
     sidebarTop: document.querySelector<HTMLElement>(".sidebar")?.scrollTop ?? 0,
+    runOutputPositions: Array.from(document.querySelectorAll<HTMLElement>("details.run[data-run-id] pre[data-run-output]"))
+      .map((element) => ({
+        runId: element.closest<HTMLElement>("details.run")?.dataset.runId ?? "",
+        stream: element.dataset.runOutput as "stdout" | "stderr",
+        top: element.scrollTop,
+        left: element.scrollLeft,
+      }))
+      .filter((position) => position.runId && position.stream),
   };
 }
 
@@ -352,6 +366,15 @@ function restoreScrollSnapshot(snapshot?: ScrollSnapshot) {
   const sidebar = document.querySelector<HTMLElement>(".sidebar");
   if (detail) detail.scrollTop = snapshot.detailTop;
   if (sidebar) sidebar.scrollTop = snapshot.sidebarTop;
+  for (const position of snapshot.runOutputPositions) {
+    const output = document.querySelector<HTMLElement>(
+      `details.run[data-run-id="${selectorEscape(position.runId)}"] pre[data-run-output="${position.stream}"]`,
+    );
+    if (output) {
+      output.scrollTop = position.top;
+      output.scrollLeft = position.left;
+    }
+  }
 }
 
 function renderDetailContent(routine?: RoutineConfig, runner?: RunnerConfig, capability?: RunnerCapability) {
@@ -474,11 +497,11 @@ function renderRun(run: RunRecord) {
         <div class="output-grid">
           <section>
             <h3>stdout${run.stdout_truncated ? " · truncated" : ""}</h3>
-            <pre>${escapeHtml(run.stdout || "")}</pre>
+            <pre data-run-output="stdout">${escapeHtml(run.stdout || "")}</pre>
           </section>
           <section>
             <h3>stderr${run.stderr_truncated ? " · truncated" : ""}</h3>
-            <pre>${escapeHtml(run.stderr || "")}</pre>
+            <pre data-run-output="stderr">${escapeHtml(run.stderr || "")}</pre>
           </section>
         </div>
       </div>
@@ -993,6 +1016,12 @@ function escapeHtml(value: unknown) {
 
 function escapeAttribute(value: unknown) {
   return escapeHtml(value).replaceAll(" ", "_");
+}
+
+function selectorEscape(value: string) {
+  const css = globalThis.CSS as { escape?: (text: string) => string } | undefined;
+  if (css?.escape) return css.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
 }
 
 loadSnapshot(false);

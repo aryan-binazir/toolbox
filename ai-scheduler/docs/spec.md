@@ -15,6 +15,7 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
 - Config path: `$XDG_CONFIG_HOME/ai-scheduler/config.toml`, fallback `~/.config/ai-scheduler/config.toml`.
 - Run history path: `$XDG_DATA_HOME/ai-scheduler/runs.db`, fallback `~/.local/share/ai-scheduler/runs.db`.
 - Config stores settings, runners, and routines.
+- Settings include a disabled-by-default mobile web server flag and port.
 - SQLite stores runs, stdout, stderr, exit state, cancel reasons, missed runs, and pruning metadata.
 - Default retention keeps the last 25 runs per routine and prunes runs older than 90 days.
 - Orphaned runs from raw config removal are hidden from the UI but still pruned.
@@ -22,6 +23,13 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
 ## Scheduling
 
 - Routines only run while the app is open.
+- The mobile web server only runs while the desktop app is open and
+  `[settings].mobile_web_enabled` is true.
+- The mobile web server binds to `127.0.0.1` on `[settings].mobile_web_port`,
+  default `6882`.
+- The mobile web surface supports routine viewing, creation, editing, deletion,
+  pause/resume, manual runs, cancellation, run history, and runner status
+  refresh.
 - Missed scheduled occurrences are stored as missed runs and are never run late.
 - Schedules use cron strings plus IANA timezones.
 - Pausing a routine prevents future scheduled execution but does not cancel an active run.

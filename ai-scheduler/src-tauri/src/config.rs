@@ -13,6 +13,7 @@ const DEFAULT_MAX_RUNS_PER_ROUTINE: u32 = 25;
 const DEFAULT_MAX_RUN_AGE_DAYS: u32 = 90;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 1_800;
 const DEFAULT_STREAM_CAP_BYTES: u64 = 5 * 1024 * 1024;
+const DEFAULT_MOBILE_WEB_PORT: u16 = 6882;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -56,6 +57,10 @@ pub struct Settings {
     pub default_timeout_seconds: u64,
     #[serde(default = "default_stream_cap_bytes")]
     pub stream_cap_bytes: u64,
+    #[serde(default)]
+    pub mobile_web_enabled: bool,
+    #[serde(default = "default_mobile_web_port")]
+    pub mobile_web_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +150,8 @@ impl Default for Settings {
             max_run_age_days: DEFAULT_MAX_RUN_AGE_DAYS,
             default_timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             stream_cap_bytes: DEFAULT_STREAM_CAP_BYTES,
+            mobile_web_enabled: false,
+            mobile_web_port: DEFAULT_MOBILE_WEB_PORT,
         }
     }
 }
@@ -167,6 +174,10 @@ fn default_timeout_seconds() -> u64 {
 
 fn default_stream_cap_bytes() -> u64 {
     DEFAULT_STREAM_CAP_BYTES
+}
+
+fn default_mobile_web_port() -> u16 {
+    DEFAULT_MOBILE_WEB_PORT
 }
 
 fn default_stdin() -> StdinMode {
@@ -328,6 +339,9 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
     }
     if config.settings.stream_cap_bytes == 0 {
         return validation("settings.stream_cap_bytes must be greater than 0");
+    }
+    if config.settings.mobile_web_port == 0 {
+        return validation("settings.mobile_web_port must be greater than 0");
     }
 
     let mut runner_ids = HashSet::new();
@@ -596,6 +610,8 @@ schedule = "0 7 * * Sat"
         assert_eq!(loaded.config.settings.max_run_age_days, 90);
         assert_eq!(loaded.config.settings.default_timeout_seconds, 1_800);
         assert_eq!(loaded.config.settings.stream_cap_bytes, 5 * 1024 * 1024);
+        assert!(!loaded.config.settings.mobile_web_enabled);
+        assert_eq!(loaded.config.settings.mobile_web_port, 6882);
 
         let routine = &loaded.config.routines[0];
         assert!(routine.id.as_ref().unwrap().starts_with("rtn_"));

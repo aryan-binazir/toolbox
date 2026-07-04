@@ -30,13 +30,32 @@ Run history is stored in SQLite and pruned by config. Defaults keep the last 25 
 
 The TOML config contains:
 
-- `[settings]` for timezone, run retention, default timeout, and output cap
+- `[settings]` for timezone, run retention, default timeout, output cap, and
+  the disabled-by-default mobile web server
 - `[[runners]]` for CLI command templates
 - `[[routines]]` for scheduled work
 
 Built-in runner defaults cover Codex, Claude Code, and Cursor Agent. Each routine chooses a runner, model, optional effort value, working directory, cron schedule, timezone, timeout, and dangerous-mode toggle.
 
 Schedules use cron strings. Five-field cron strings are accepted and normalized to six-field cron with a leading seconds field.
+
+## Mobile Web Spike
+
+The embedded mobile web server is off by default. To enable it, set:
+
+```toml
+[settings]
+mobile_web_enabled = true
+mobile_web_port = 6882
+```
+
+When enabled, the desktop app binds a mobile web UI/API to
+`http://127.0.0.1:6882` while the app is open. When disabled, no HTTP listener
+is started. The mobile surface can view, create, edit, pause, resume, delete,
+run, and cancel routines, and can refresh runner status checks.
+
+External config-file edits are applied on the next app launch. In-app raw config
+saves reconcile the mobile server immediately.
 
 ## Runtime Behavior
 
