@@ -225,6 +225,7 @@ function render() {
           ${renderDetailPane()}
         </section>
       </div>
+      ${renderSidePanel()}
     </main>
   `;
   restoreRenderSnapshot(renderSnapshot);
@@ -309,20 +310,8 @@ function renderRunner(runner) {
 function renderRoutineButton(routine) {
   const selected = routine.id === state.selectedId ? " selected" : "";
   const stateClass = routine.dangerous ? " dangerous" : routine.paused ? " paused" : "";
-  const pill = routine.active_run
-    ? "Running"
-    : routine.dangerous
-      ? "Dangerous"
-      : routine.paused
-        ? "Paused"
-        : "Active";
-  const pillClass = routine.active_run
-    ? "active"
-    : routine.dangerous
-      ? "dangerous"
-      : routine.paused
-        ? "paused"
-        : "active";
+  const stateLabel = routine.active_run ? "Running" : routine.dangerous ? "Dangerous" : "";
+  const stateLabelClass = routine.active_run ? "running" : routine.dangerous ? "dangerous" : "";
 
   return `
     <button class="routine-button${selected}${stateClass}" data-action="select" data-id="${escapeAttribute(routine.id)}">
@@ -330,18 +319,31 @@ function renderRoutineButton(routine) {
       <span class="routine-copy">
         <span class="routine-title">${escapeHtml(routine.title)}</span>
         <span class="routine-meta">${escapeHtml(routine.project_label)} - ${escapeHtml(routine.runner_label)}</span>
+        ${stateLabel ? `<span class="routine-state ${stateLabelClass}">${escapeHtml(stateLabel)}</span>` : ""}
       </span>
-      <span class="routine-pill ${pillClass}">${escapeHtml(pill)}</span>
     </button>
   `;
 }
 
 function renderDetailPane() {
-  if (state.mode === "new" || state.mode === "edit") {
-    return renderRoutineForm(state.draft || newRoutine());
-  }
   const routine = selectedRoutine();
   return routine ? renderDetail(routine) : `<div class="empty">No routine selected</div>`;
+}
+
+function renderSidePanel() {
+  if (state.mode !== "new" && state.mode !== "edit") return "";
+  return `
+    <div class="side-panel-layer">
+      <button class="side-panel-scrim" data-action="cancel-edit" aria-label="Close editor"></button>
+      <aside class="side-panel" aria-label="${state.mode === "new" ? "New routine" : "Edit routine"}">
+        <header class="side-panel-head">
+          <h2>${state.mode === "new" ? "New routine" : "Edit routine"}</h2>
+          <button type="button" data-action="cancel-edit">Close</button>
+        </header>
+        ${renderRoutineForm(state.draft || newRoutine())}
+      </aside>
+    </div>
+  `;
 }
 
 function renderDetail(routine) {
@@ -394,9 +396,6 @@ function renderRoutineForm(routine) {
 
   return `
     <form id="routine-form" class="routine-form">
-      <div class="detail-head">
-        <h2>${state.mode === "new" ? "New routine" : "Edit routine"}</h2>
-      </div>
       <input type="hidden" name="id" value="${escapeAttribute(routine.id || "")}" />
       <label>Title<input name="title" value="${escapeAttribute(routine.title || "")}" required /></label>
       <label>Description<textarea name="description">${escapeHtml(routine.description || "")}</textarea></label>
@@ -416,9 +415,9 @@ function renderRoutineForm(routine) {
         <label><input type="checkbox" name="paused" ${routine.paused ? "checked" : ""} /> Paused</label>
         <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous</label>
       </div>
-      <div class="actions">
-        <button class="primary wide" type="submit" ${state.busy ? "disabled" : ""}>Save routine</button>
+      <div class="form-actions">
         <button type="button" data-action="cancel-edit">Cancel</button>
+        <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>Save routine</button>
       </div>
     </form>
   `;

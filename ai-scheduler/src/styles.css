@@ -83,6 +83,40 @@ button:disabled {
   overflow: hidden;
 }
 
+.sidebar,
+.detail,
+.prompt,
+.run pre {
+  scrollbar-color: #3b423e transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.sidebar::-webkit-scrollbar,
+.detail::-webkit-scrollbar,
+.prompt::-webkit-scrollbar,
+.run pre::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.sidebar::-webkit-scrollbar-track,
+.detail::-webkit-scrollbar-track,
+.prompt::-webkit-scrollbar-track,
+.run pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar::-webkit-scrollbar-thumb,
+.detail::-webkit-scrollbar-thumb,
+.prompt::-webkit-scrollbar-thumb,
+.run pre::-webkit-scrollbar-thumb {
+  background: #3b423e;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+
 .sidebar {
   border-right: 1px solid var(--line);
   min-width: 0;

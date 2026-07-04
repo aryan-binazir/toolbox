@@ -112,6 +112,7 @@ type Snapshot = {
 type State = {
   snapshot?: Snapshot;
   selectedRoutineId?: string;
+  renderSignature?: string;
   runs: RunRecord[];
   query: string;
   mode: "details" | "edit" | "new";
@@ -130,6 +131,7 @@ type State = {
 
 type RenderOptions = {
   preserveScroll?: boolean;
+  skipIfUnchanged?: boolean;
 };
 
 type ScrollSnapshot = {
@@ -293,6 +295,12 @@ function render(options: RenderOptions = {}) {
     return;
   }
 
+  const signature = renderSignature(snapshot);
+  if (options.skipIfUnchanged && signature === state.renderSignature) {
+    return;
+  }
+  state.renderSignature = signature;
+
   const scrollSnapshot = options.preserveScroll ? captureScrollSnapshot() : undefined;
 
   const current = filteredRoutines(false);
@@ -375,6 +383,29 @@ function restoreScrollSnapshot(snapshot?: ScrollSnapshot) {
       output.scrollLeft = position.left;
     }
   }
+}
+
+function renderSignature(snapshot: Snapshot) {
+  return JSON.stringify({
+    selectedRoutineId: state.selectedRoutineId,
+    query: state.query,
+    mode: state.mode,
+    rawOpen: state.rawOpen,
+    rawText: state.rawOpen ? state.rawText : "",
+    formDraft: state.formDraft,
+    schedulePreview: state.schedulePreview,
+    openRunIds: Array.from(state.openRunIds).sort(),
+    copiedRunId: state.copiedRunId,
+    error: state.error,
+    snapshot: {
+      config_path: snapshot.config_path,
+      db_path: snapshot.db_path,
+      config: snapshot.config,
+      runner_capabilities: snapshot.runner_capabilities,
+      routine_schedules: snapshot.routine_schedules,
+    },
+    runs: state.runs,
+  });
 }
 
 function renderDetailContent(routine?: RoutineConfig, runner?: RunnerConfig, capability?: RunnerCapability) {
@@ -1029,6 +1060,6 @@ setTimeout(() => loadSnapshot(true, { preserveScroll: true }), 1_000);
 setTimeout(() => loadSnapshot(true, { preserveScroll: true }), 8_000);
 setInterval(() => {
   if (!state.rawOpen && state.mode === "details") {
-    loadSnapshot(true, { preserveScroll: true }, false);
+    loadSnapshot(true, { preserveScroll: true, skipIfUnchanged: true }, false);
   }
 }, 3_000);
