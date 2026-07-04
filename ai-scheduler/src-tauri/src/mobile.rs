@@ -21,7 +21,7 @@ use crate::{AppError, AppState};
 const INDEX_HTML: &str = include_str!("../mobile/index.html");
 const MOBILE_CSS: &str = include_str!("../mobile/mobile.css");
 const MOBILE_JS: &str = include_str!("../mobile/mobile.js");
-const ASSET_VERSION: &str = "20260704-no-danger-list-refresh";
+const ASSET_VERSION: &str = "20260704-mobile-schedule-selects";
 const MUTATION_HEADER: &str = "x-ai-scheduler-mobile";
 const MUTATION_HEADER_VALUE: &str = "1";
 const OUTPUT_PREVIEW_BYTES: usize = 6 * 1024;

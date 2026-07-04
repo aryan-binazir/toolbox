@@ -16,6 +16,20 @@ const mutationHeaders = {
   "X-AI-Scheduler-Mobile": "1",
 };
 
+const CUSTOM_SCHEDULE_VALUE = "__custom__";
+const DAY_OPTIONS = [
+  { value: "*", label: "Every day" },
+  { value: "Mon-Fri", label: "Weekdays" },
+  { value: "Mon", label: "Monday" },
+  { value: "Tue", label: "Tuesday" },
+  { value: "Wed", label: "Wednesday" },
+  { value: "Thu", label: "Thursday" },
+  { value: "Fri", label: "Friday" },
+  { value: "Sat", label: "Saturday" },
+  { value: "Sun", label: "Sunday" },
+];
+const TIME_OPTIONS = buildTimeOptions();
+
 loadSnapshot(false);
 setInterval(() => {
   if (!state.busy && state.mode === "details") loadSnapshot(true, true);
@@ -83,15 +97,24 @@ app.addEventListener("click", async (event) => {
 
 app.addEventListener("change", (event) => {
   if (!(event.target instanceof HTMLSelectElement)) return;
-  if (event.target.name !== "runner" || !state.draft) return;
-  const runner = runnerById(event.target.value);
-  if (!runner) return;
-  state.draft.runner_id = runner.id;
-  state.draft.runner_label = runner.label;
-  state.draft.model = runner.default_model || runner.models?.[0]?.value || "";
-  state.draft.effort = runner.default_effort || runner.efforts?.[0]?.value || "";
-  state.draft.timeout_seconds = runner.default_timeout_seconds || state.draft.timeout_seconds || null;
-  render();
+  if (!state.draft) return;
+  const form = event.target.closest("#routine-form");
+  if (!(form instanceof HTMLFormElement)) return;
+
+  if (event.target.name === "runner") {
+    const runner = runnerById(event.target.value);
+    if (!runner) return;
+    state.draft = routineDraftFromForm(form);
+    state.draft.runner_id = runner.id;
+    state.draft.runner_label = runner.label;
+    state.draft.model = runner.default_model || runner.models?.[0]?.value || "";
+    state.draft.effort = runner.default_effort || runner.efforts?.[0]?.value || "";
+    state.draft.timeout_seconds = runner.default_timeout_seconds || state.draft.timeout_seconds || null;
+    render();
+  } else if (event.target.name === "schedule_day") {
+    state.draft = routineDraftFromForm(form);
+    render();
+  }
 });
 
 app.addEventListener("submit", async (event) => {
@@ -385,6 +408,7 @@ function renderRoutineForm(routine) {
   const runner = runnerById(routine.runner_id) || state.snapshot?.runners?.[0] || null;
   const models = runner?.models || [];
   const efforts = runner?.efforts || [];
+  const schedule = parseScheduleControls(routine.schedule || "0 7 * * Sat");
 
   return `
     <form id="routine-form" class="routine-form">
@@ -399,7 +423,12 @@ function renderRoutineForm(routine) {
       </div>
       <label>Working directory<input name="cwd" value="${escapeAttribute(routine.cwd || "")}" required /></label>
       <div class="form-grid">
-        <label>Schedule<input name="schedule" value="${escapeAttribute(routine.schedule || "")}" required /></label>
+        <label>Day<select name="schedule_day">${DAY_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.day)).join("")}${optionHtml(CUSTOM_SCHEDULE_VALUE, "Custom cron", schedule.day)}</select></label>
+        ${
+          schedule.day === CUSTOM_SCHEDULE_VALUE
+            ? `<label class="custom-schedule">Cron<input name="schedule_custom" value="${escapeAttribute(schedule.custom)}" required /></label>`
+            : `<label>Time<select name="schedule_time">${TIME_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.time)).join("")}</select></label>`
+        }
         <label>Timezone<input name="timezone" value="${escapeAttribute(routine.timezone || state.snapshot?.timezone || "UTC")}" /></label>
         <label>Timeout seconds<input type="number" min="1" name="timeout_seconds" value="${escapeAttribute(routine.timeout_seconds || "")}" /></label>
       </div>
@@ -447,6 +476,15 @@ function routineFromForm(form) {
   const data = new FormData(form);
   const id = String(data.get("id") || "").trim() || newRoutineId();
   const timeoutRaw = String(data.get("timeout_seconds") || "").trim();
+  const scheduleDay = String(data.get("schedule_day") || "");
+  const scheduleTime = String(data.get("schedule_time") || "");
+  const currentSchedule = state.draft?.schedule || selectedRoutine()?.schedule || "0 7 * * Sat";
+  const currentControls = parseScheduleControls(currentSchedule);
+  const schedule =
+    scheduleDay && scheduleDay !== CUSTOM_SCHEDULE_VALUE
+      ? buildSimpleSchedule(scheduleDay, scheduleTime || currentControls.time)
+      : String(data.get("schedule_custom") || currentSchedule);
+
   return {
     id,
     title: String(data.get("title") || "").trim(),
@@ -456,11 +494,32 @@ function routineFromForm(form) {
     model: nullableString(data.get("model")),
     effort: nullableString(data.get("effort")),
     cwd: String(data.get("cwd") || "").trim(),
-    schedule: String(data.get("schedule") || "").trim(),
+    schedule,
     timezone: nullableString(data.get("timezone")),
     paused: data.has("paused"),
     dangerous: data.has("dangerous"),
     timeout_seconds: timeoutRaw ? Number(timeoutRaw) : null,
+  };
+}
+
+function routineDraftFromForm(form) {
+  const routine = routineFromForm(form);
+  const runner = runnerById(routine.runner);
+  return {
+    id: routine.id,
+    title: routine.title,
+    description: routine.description,
+    prompt: routine.prompt,
+    runner_id: routine.runner,
+    runner_label: runner?.label || routine.runner,
+    model: routine.model,
+    effort: routine.effort,
+    cwd: routine.cwd,
+    schedule: routine.schedule,
+    timezone: routine.timezone || state.snapshot?.timezone || "UTC",
+    paused: routine.paused,
+    dangerous: routine.dangerous,
+    timeout_seconds: routine.timeout_seconds,
   };
 }
 
@@ -486,6 +545,57 @@ function newRoutine() {
 
 function newRoutineId() {
   return `rtn_mobile_${Date.now().toString(36)}`;
+}
+
+function buildTimeOptions() {
+  const options = [];
+  for (let hour = 0; hour < 24; hour += 1) {
+    for (let minute = 0; minute < 60; minute += 5) {
+      const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      options.push({ value, label: timeLabel(value) });
+    }
+  }
+  return options;
+}
+
+function parseScheduleControls(schedule) {
+  const parsed = parseSimpleSchedule(schedule);
+  if (parsed) return { ...parsed, custom: "" };
+  return { day: CUSTOM_SCHEDULE_VALUE, time: "07:00", custom: schedule };
+}
+
+function parseSimpleSchedule(schedule) {
+  const fields = String(schedule || "").trim().split(/\s+/).filter(Boolean);
+  const cron = fields.length === 6 && fields[0] === "0" ? fields.slice(1) : fields;
+  if (cron.length !== 5) return undefined;
+
+  const [minute, hour, dayOfMonth, month, day] = cron;
+  if (dayOfMonth !== "*" || month !== "*") return undefined;
+  if (!DAY_OPTIONS.some((option) => option.value === day)) return undefined;
+
+  const hourNumber = Number(hour);
+  const minuteNumber = Number(minute);
+  if (!Number.isInteger(hourNumber) || !Number.isInteger(minuteNumber)) return undefined;
+  if (hourNumber < 0 || hourNumber > 23 || minuteNumber < 0 || minuteNumber > 59) return undefined;
+  if (minuteNumber % 5 !== 0) return undefined;
+
+  return {
+    day,
+    time: `${String(hourNumber).padStart(2, "0")}:${String(minuteNumber).padStart(2, "0")}`,
+  };
+}
+
+function buildSimpleSchedule(day, time) {
+  const [hour = "7", minute = "0"] = String(time || "07:00").split(":");
+  return `${Number(minute)} ${Number(hour)} * * ${day}`;
+}
+
+function timeLabel(value) {
+  const [hourRaw = "0", minute = "00"] = value.split(":");
+  const hour = Number(hourRaw);
+  const displayHour = hour % 12 || 12;
+  const period = hour < 12 ? "AM" : "PM";
+  return `${displayHour}:${minute.padStart(2, "0")} ${period}`;
 }
 
 function optionHtml(value, label, selected) {

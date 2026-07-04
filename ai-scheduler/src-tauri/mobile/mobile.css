@@ -575,6 +575,10 @@ pre {
   gap: 12px;
 }
 
+.custom-schedule {
+  grid-column: 1 / -1;
+}
+
 .check-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
