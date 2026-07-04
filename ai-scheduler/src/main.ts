@@ -145,6 +145,13 @@ type ScrollSnapshot = {
   }[];
 };
 
+type ScheduleControls = {
+  days: string[];
+  time: string;
+  custom: string;
+  customEnabled: boolean;
+};
+
 const state: State = {
   runs: [],
   query: "",
@@ -157,17 +164,22 @@ const state: State = {
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-const CUSTOM_SCHEDULE_VALUE = "__custom__";
-const DAY_OPTIONS: OptionValue[] = [
-  { value: "*", label: "Every day" },
-  { value: "Mon-Fri", label: "Weekdays" },
-  { value: "Mon", label: "Monday" },
-  { value: "Tue", label: "Tuesday" },
-  { value: "Wed", label: "Wednesday" },
-  { value: "Thu", label: "Thursday" },
-  { value: "Fri", label: "Friday" },
-  { value: "Sat", label: "Saturday" },
-  { value: "Sun", label: "Sunday" },
+const DAY_VALUES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const CRON_DAY_ORDER = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAY_VALUES = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+const DAY_LABELS: Record<string, string> = {
+  Mon: "Monday",
+  Tue: "Tuesday",
+  Wed: "Wednesday",
+  Thu: "Thursday",
+  Fri: "Friday",
+  Sat: "Saturday",
+  Sun: "Sunday",
+};
+const DAY_PRESETS = [
+  { id: "weekdays", label: "Mon-Fri", days: WEEKDAY_VALUES },
+  { id: "mon-sun", label: "Mon-Sun", days: DAY_VALUES },
+  { id: "sun-sat", label: "Sun-Sat", days: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] },
 ];
 const TIME_OPTIONS = buildTimeOptions();
 const ACTIVE_RUN_STATUSES: RunStatus[] = ["queued", "running"];
@@ -271,7 +283,7 @@ function nextRunLabel(routine: RoutineConfig) {
 function friendlySchedule(schedule: string) {
   const parsed = parseSimpleSchedule(schedule);
   if (!parsed) return schedule;
-  return `${dayLabel(parsed.day)} at ${timeLabel(parsed.time)}`;
+  return `${daySetLabel(parsed.days)} at ${timeLabel(parsed.time)}`;
 }
 
 function statusClass(status: RunStatus) {
@@ -572,9 +584,9 @@ function renderRoutineForm(routine: RoutineConfig) {
         <label>Model<input name="model" list="${modelListId}" value="${escapeHtml(routine.model || runner?.default_model || "")}" required /></label>
         <datalist id="${modelListId}">${models.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join("")}</datalist>
         <label>Effort<select name="effort"><option value="">—</option>${efforts.map((item) => optionHtml(item.value, item.label, routine.effort || runner?.default_effort)).join("")}</select></label>
-        <label>Day<select name="schedule_day">${DAY_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.day)).join("")}${optionHtml(CUSTOM_SCHEDULE_VALUE, "Custom cron", schedule.day)}</select></label>
+        ${renderScheduleDayControls(schedule)}
         ${
-          schedule.day === CUSTOM_SCHEDULE_VALUE
+          schedule.customEnabled
             ? `<label class="custom-schedule">Cron<input name="schedule_custom" value="${escapeHtml(schedule.custom)}" required /></label>`
             : `<label>Time<select name="schedule_time">${TIME_OPTIONS.map((item) => optionHtml(item.value, item.label, schedule.time)).join("")}</select></label>`
         }
@@ -599,6 +611,25 @@ function renderRoutineForm(routine: RoutineConfig) {
       }
     </form>
   `;
+}
+
+function renderScheduleDayControls(schedule: ScheduleControls) {
+  return `
+    <fieldset class="schedule-days">
+      <legend>Days</legend>
+      ${
+        schedule.customEnabled
+          ? ""
+          : `<div class="schedule-preset-row">${DAY_PRESETS.map((preset) => `<button type="button" data-schedule-preset="${escapeHtml(preset.id)}">${escapeHtml(preset.label)}</button>`).join("")}</div>
+             <div class="day-checkbox-grid">${DAY_VALUES.map((day) => renderDayCheckbox(day, schedule.days.includes(day))).join("")}</div>`
+      }
+      <label class="schedule-custom-toggle"><input type="checkbox" name="schedule_custom_enabled" ${schedule.customEnabled ? "checked" : ""} /> Custom cron</label>
+    </fieldset>
+  `;
+}
+
+function renderDayCheckbox(day: string, checked: boolean) {
+  return `<label><input type="checkbox" name="schedule_days" value="${escapeHtml(day)}" ${checked ? "checked" : ""} /> ${escapeHtml(day)}</label>`;
 }
 
 function renderSchedulePreview(routine: RoutineConfig) {
@@ -668,10 +699,10 @@ function buildTimeOptions() {
   return options;
 }
 
-function parseScheduleControls(schedule: string) {
+function parseScheduleControls(schedule: string): ScheduleControls {
   const parsed = parseSimpleSchedule(schedule);
-  if (parsed) return { ...parsed, custom: "" };
-  return { day: CUSTOM_SCHEDULE_VALUE, time: "07:00", custom: schedule };
+  if (parsed) return { ...parsed, custom: "", customEnabled: false };
+  return { days: [...DAY_VALUES], time: "07:00", custom: schedule, customEnabled: true };
 }
 
 function parseSimpleSchedule(schedule: string) {
@@ -679,9 +710,10 @@ function parseSimpleSchedule(schedule: string) {
   const cron = fields.length === 6 && fields[0] === "0" ? fields.slice(1) : fields;
   if (cron.length !== 5) return undefined;
 
-  const [minute, hour, dayOfMonth, month, day] = cron;
+  const [minute, hour, dayOfMonth, month, dayField] = cron;
   if (dayOfMonth !== "*" || month !== "*") return undefined;
-  if (!DAY_OPTIONS.some((option) => option.value === day)) return undefined;
+  const days = parseDayField(dayField);
+  if (!days?.length) return undefined;
 
   const hourNumber = Number(hour);
   const minuteNumber = Number(minute);
@@ -690,14 +722,66 @@ function parseSimpleSchedule(schedule: string) {
   if (minuteNumber % 5 !== 0) return undefined;
 
   return {
-    day,
+    days,
     time: `${String(hourNumber).padStart(2, "0")}:${String(minuteNumber).padStart(2, "0")}`,
   };
 }
 
-function buildSimpleSchedule(day: string, time: string) {
+function buildSimpleSchedule(days: string[], time: string) {
   const [hour = "7", minute = "0"] = time.split(":");
-  return `${Number(minute)} ${Number(hour)} * * ${day}`;
+  return `${Number(minute)} ${Number(hour)} * * ${buildDayField(days)}`;
+}
+
+function buildDayField(days: string[]) {
+  const ordered = orderDays(days);
+  if (sameDays(ordered, DAY_VALUES)) return "*";
+  if (sameDays(ordered, WEEKDAY_VALUES)) return "Mon-Fri";
+  return ordered.join(",");
+}
+
+function parseDayField(value: string) {
+  if (value === "*") return [...DAY_VALUES];
+  const days: string[] = [];
+  for (const part of value.split(",")) {
+    const expanded = expandDayPart(part.trim());
+    if (!expanded.length) return undefined;
+    days.push(...expanded);
+  }
+  return orderDays(days);
+}
+
+function expandDayPart(value: string) {
+  if (!value) return [];
+  if (value.includes("-")) {
+    const [startRaw, endRaw] = value.split("-", 2);
+    const start = normalizeDayValue(startRaw);
+    const end = normalizeDayValue(endRaw);
+    if (!start || !end) return [];
+    const startIndex = CRON_DAY_ORDER.indexOf(start);
+    const endIndex = CRON_DAY_ORDER.indexOf(end);
+    if (startIndex < 0 || endIndex < 0) return [];
+    const ordered =
+      startIndex <= endIndex
+        ? CRON_DAY_ORDER.slice(startIndex, endIndex + 1)
+        : [...CRON_DAY_ORDER.slice(startIndex), ...CRON_DAY_ORDER.slice(0, endIndex + 1)];
+    return ordered;
+  }
+  const day = normalizeDayValue(value);
+  return day ? [day] : [];
+}
+
+function normalizeDayValue(value: string) {
+  const lower = value.trim().toLowerCase();
+  return DAY_VALUES.find((day) => day.toLowerCase() === lower) ?? undefined;
+}
+
+function orderDays(days: string[]) {
+  const selected = new Set(days.filter((day) => DAY_VALUES.includes(day)));
+  return DAY_VALUES.filter((day) => selected.has(day));
+}
+
+function sameDays(left: string[], right: string[]) {
+  return left.length === right.length && left.every((day, index) => day === right[index]);
 }
 
 function schedulePreviewKey(routine: RoutineConfig) {
@@ -724,8 +808,11 @@ function queueSchedulePreview(routine: RoutineConfig) {
   }, 250);
 }
 
-function dayLabel(day: string) {
-  return DAY_OPTIONS.find((option) => option.value === day)?.label ?? day;
+function daySetLabel(days: string[]) {
+  if (sameDays(days, DAY_VALUES)) return "Every day";
+  if (sameDays(days, WEEKDAY_VALUES)) return "Mon-Fri";
+  if (days.length === 1) return DAY_LABELS[days[0]] ?? days[0];
+  return days.join(", ");
 }
 
 function timeLabel(value: string) {
@@ -774,6 +861,16 @@ function wireEvents() {
   });
 
   const form = document.querySelector<HTMLFormElement>("#routine-form");
+  form?.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement | null)?.closest("[data-schedule-preset]") as HTMLButtonElement | null;
+    if (!button) return;
+    event.preventDefault();
+    applySchedulePreset(form, button.dataset.schedulePreset || "");
+    const draft = routineFromForm(form);
+    state.formDraft = draft;
+    render();
+    queueSchedulePreview(draft);
+  });
   form?.addEventListener("input", (event) => {
     state.formDraft = routineFromForm(form);
     if (isSchedulePreviewField(event.target)) {
@@ -781,6 +878,9 @@ function wireEvents() {
     }
   });
   form?.addEventListener("change", (event) => {
+    if ((event.target as HTMLInputElement | HTMLSelectElement).name === "schedule_days") {
+      ensureAtLeastOneScheduleDay(form, event.target as HTMLInputElement);
+    }
     const draft = routineFromForm(form);
     if ((event.target as HTMLInputElement | HTMLSelectElement).name === "runner") {
       applyRunnerDefaults(draft);
@@ -789,8 +889,7 @@ function wireEvents() {
       queueSchedulePreview(draft);
       return;
     }
-    if ((event.target as HTMLInputElement | HTMLSelectElement).name === "schedule_day") {
-      if (!draft.schedule) draft.schedule = state.formDraft?.schedule || selectedRoutine()?.schedule || "0 7 * * Sat";
+    if ((event.target as HTMLInputElement | HTMLSelectElement).name === "schedule_custom_enabled") {
       state.formDraft = draft;
       render();
       queueSchedulePreview(draft);
@@ -805,6 +904,21 @@ function wireEvents() {
     event.preventDefault();
     await saveRoutineFromForm(event.currentTarget as HTMLFormElement);
   });
+}
+
+function applySchedulePreset(form: HTMLFormElement, presetId: string) {
+  const preset = DAY_PRESETS.find((item) => item.id === presetId);
+  if (!preset) return;
+  form.querySelectorAll<HTMLInputElement>('input[name="schedule_days"]').forEach((input) => {
+    input.checked = preset.days.includes(input.value);
+  });
+}
+
+function ensureAtLeastOneScheduleDay(form: HTMLFormElement, fallback?: HTMLInputElement) {
+  const inputs = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="schedule_days"]'));
+  if (!inputs.length || inputs.some((input) => input.checked)) return;
+  const nextChecked = inputs.find((input) => input.value === fallback?.value) ?? inputs[0];
+  nextChecked.checked = true;
 }
 
 async function handleAction(action: string, element: HTMLElement) {
@@ -923,13 +1037,13 @@ async function saveRoutineFromForm(form: HTMLFormElement) {
 function routineFromForm(form: HTMLFormElement): RoutineConfig {
   const data = new FormData(form);
   const timeoutRaw = String(data.get("timeout_seconds") || "").trim();
-  const scheduleDay = String(data.get("schedule_day") || "");
   const scheduleTime = String(data.get("schedule_time") || "");
-  const currentSchedule = state.formDraft?.schedule || selectedRoutine()?.schedule || "0 7 * * Sat";
+  const customScheduleEnabled = data.get("schedule_custom_enabled") === "on";
+  const currentSchedule = state.formDraft?.schedule || selectedRoutine()?.schedule || "0 7 * * *";
   const currentControls = parseScheduleControls(currentSchedule);
   const schedule =
-    scheduleDay && scheduleDay !== CUSTOM_SCHEDULE_VALUE
-      ? buildSimpleSchedule(scheduleDay, scheduleTime || currentControls.time)
+    !customScheduleEnabled
+      ? buildSimpleSchedule(scheduleDaysFromForm(data, currentControls.days), scheduleTime || currentControls.time)
       : String(data.get("schedule_custom") || currentSchedule);
   return {
     id: String(data.get("id") || "") || null,
@@ -948,6 +1062,12 @@ function routineFromForm(form: HTMLFormElement): RoutineConfig {
   };
 }
 
+function scheduleDaysFromForm(data: FormData, fallbackDays: string[]) {
+  const selected = data.getAll("schedule_days").map(String);
+  const days = orderDays(selected);
+  return days.length ? days : fallbackDays;
+}
+
 function applyRunnerDefaults(routine: RoutineConfig) {
   const runner = state.snapshot?.config.runners.find((item) => item.id === routine.runner);
   routine.model = runner?.default_model ?? null;
@@ -956,7 +1076,13 @@ function applyRunnerDefaults(routine: RoutineConfig) {
 
 function isSchedulePreviewField(target: EventTarget | null) {
   const name = (target as HTMLInputElement | HTMLSelectElement | null)?.name;
-  return name === "schedule_day" || name === "schedule_time" || name === "schedule_custom" || name === "timezone";
+  return (
+    name === "schedule_days" ||
+    name === "schedule_custom_enabled" ||
+    name === "schedule_time" ||
+    name === "schedule_custom" ||
+    name === "timezone"
+  );
 }
 
 function copyPayloadForRun(run: RunRecord) {

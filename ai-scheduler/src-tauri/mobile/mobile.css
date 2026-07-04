@@ -579,6 +579,59 @@ pre {
   grid-column: 1 / -1;
 }
 
+.schedule-days {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 11px 12px 12px;
+  color: var(--muted);
+  background: #151815;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.schedule-days legend {
+  padding: 0 4px;
+}
+
+.schedule-preset-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.schedule-preset-row button {
+  min-height: 36px;
+  border-radius: 7px;
+  padding: 0 8px;
+}
+
+.day-checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.day-checkbox-grid label,
+label.schedule-custom-toggle {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #171917;
+  padding: 0 11px;
+}
+
+.day-checkbox-grid input,
+.schedule-custom-toggle input {
+  accent-color: var(--accent);
+}
+
 .check-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -629,6 +682,10 @@ pre {
 
   .form-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .day-checkbox-grid {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
   }
 
   .detail {

@@ -741,6 +741,33 @@ schedule = "0 9 * * Mon-Fri"
     }
 
     #[test]
+    fn accepts_selected_weekday_list_schedule_generated_by_form() {
+        let cwd = tempfile::tempdir().unwrap();
+        let text = format!(
+            r#"
+[[runners]]
+id = "codex"
+label = "Codex"
+command = "codex"
+kind = "codex"
+args = ["exec", "{{{{prompt}}}}"]
+
+[[routines]]
+id = "rtn_selected_days"
+title = "Selected days routine"
+prompt = "Do it."
+runner = "codex"
+model = "gpt-5.5"
+cwd = "{}"
+schedule = "0 9 * * Mon,Wed,Fri"
+"#,
+            cwd.path().display()
+        );
+
+        load_config_from_str(&text).unwrap();
+    }
+
+    #[test]
     fn save_config_text_creates_backup_before_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
