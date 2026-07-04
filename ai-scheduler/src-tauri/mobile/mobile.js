@@ -41,12 +41,8 @@ app.addEventListener("click", async (event) => {
       render();
       await loadRuns(id);
     } else if (action === "refresh") {
-      await loadSnapshot(true);
-    } else if (action === "refresh-runners") {
       await mutate("/api/runners/refresh");
       await loadSnapshot(true);
-    } else if (action === "refresh-runs" && routine) {
-      await loadRuns(routine.id);
     } else if (action === "new-routine") {
       state.mode = "new";
       state.draft = newRoutine();
@@ -286,7 +282,6 @@ function renderRunnerPanel(runners) {
     <section class="runner-panel">
       <div class="section-head">
         <h2>Runners</h2>
-        <button class="small" data-action="refresh-runners" ${state.busy ? "disabled" : ""}>Refresh</button>
       </div>
       <div class="runner-list">
         ${runners.length ? runners.map(renderRunner).join("") : `<div class="empty">No runners configured</div>`}
@@ -309,9 +304,8 @@ function renderRunner(runner) {
 
 function renderRoutineButton(routine) {
   const selected = routine.id === state.selectedId ? " selected" : "";
-  const stateClass = routine.dangerous ? " dangerous" : routine.paused ? " paused" : "";
-  const stateLabel = routine.active_run ? "Running" : routine.dangerous ? "Dangerous" : "";
-  const stateLabelClass = routine.active_run ? "running" : routine.dangerous ? "dangerous" : "";
+  const stateClass = routine.paused ? " paused" : "";
+  const stateLabel = routine.active_run ? "Running" : "";
 
   return `
     <button class="routine-button${selected}${stateClass}" data-action="select" data-id="${escapeAttribute(routine.id)}">
@@ -319,7 +313,7 @@ function renderRoutineButton(routine) {
       <span class="routine-copy">
         <span class="routine-title">${escapeHtml(routine.title)}</span>
         <span class="routine-meta">${escapeHtml(routine.project_label)} - ${escapeHtml(routine.runner_label)}</span>
-        ${stateLabel ? `<span class="routine-state ${stateLabelClass}">${escapeHtml(stateLabel)}</span>` : ""}
+        ${stateLabel ? `<span class="routine-state running">${escapeHtml(stateLabel)}</span>` : ""}
       </span>
     </button>
   `;
@@ -368,7 +362,6 @@ function renderDetail(routine) {
       }
       <button data-action="pause" data-id="${escapeAttribute(routine.id)}" ${state.busy ? "disabled" : ""}>${routine.paused ? "Resume" : "Pause"}</button>
       <button data-action="edit-routine" data-id="${escapeAttribute(routine.id)}" ${state.busy ? "disabled" : ""}>Edit</button>
-      <button data-action="refresh-runs" data-id="${escapeAttribute(routine.id)}" ${state.busy ? "disabled" : ""}>Reload runs</button>
       <button class="danger" data-action="delete-routine" data-id="${escapeAttribute(routine.id)}" ${state.busy ? "disabled" : ""}>Delete</button>
     </div>
     <div class="facts">
@@ -381,7 +374,6 @@ function renderDetail(routine) {
     </div>
     <div class="section-title">
       <h3>Runs</h3>
-      <button data-action="refresh-runs" data-id="${escapeAttribute(routine.id)}" ${state.busy ? "disabled" : ""}>Refresh</button>
     </div>
     <div class="runs">
       ${state.runsFor === routine.id && state.runs.length ? state.runs.map(renderRun).join("") : `<div class="empty">No run history loaded</div>`}
@@ -517,7 +509,6 @@ function fact(label, value) {
 function routineStatus(routine) {
   if (routine.active_run) return statusText(routine.active_run.status);
   if (routine.paused) return "Paused";
-  if (routine.dangerous) return "Dangerous";
   return "Active";
 }
 

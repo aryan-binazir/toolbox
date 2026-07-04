@@ -181,13 +181,6 @@ pre {
   letter-spacing: 0;
 }
 
-.section-head .small {
-  min-height: 32px;
-  padding: 0 10px;
-  color: var(--focus);
-  background: transparent;
-}
-
 .routines {
   display: grid;
   gap: 8px;
@@ -264,10 +257,6 @@ pre {
   background: var(--accent-2);
 }
 
-.routine-button.dangerous .routine-rail {
-  background: var(--danger);
-}
-
 .routine-copy {
   min-width: 0;
   display: grid;
@@ -292,10 +281,6 @@ pre {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
-}
-
-.routine-state.dangerous {
-  color: var(--danger);
 }
 
 .routine-state.running {
@@ -407,11 +392,9 @@ pre {
 }
 
 .section-title {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
   min-height: 42px;
+  display: flex;
+  align-items: center;
   margin-top: 18px;
 }
 
@@ -419,13 +402,6 @@ pre {
   margin: 0;
   font-size: 17px;
   letter-spacing: 0;
-}
-
-.section-title button {
-  min-height: 34px;
-  padding: 0 10px;
-  color: var(--focus);
-  background: transparent;
 }
 
 .runs {
