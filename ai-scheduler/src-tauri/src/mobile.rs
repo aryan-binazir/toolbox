@@ -21,7 +21,8 @@ use crate::{AppError, AppState};
 const INDEX_HTML: &str = include_str!("../mobile/index.html");
 const MOBILE_CSS: &str = include_str!("../mobile/mobile.css");
 const MOBILE_JS: &str = include_str!("../mobile/mobile.js");
-const ASSET_VERSION: &str = "20260704-schedule-day-checkboxes";
+const MOBILE_VIEW_JS: &str = include_str!("../mobile/mobile-view.js");
+const ASSET_VERSION: &str = "20260704-mobile-sidebar-shell";
 const MUTATION_HEADER: &str = "x-ai-scheduler-mobile";
 const MUTATION_HEADER_VALUE: &str = "1";
 const OUTPUT_PREVIEW_BYTES: usize = 6 * 1024;
@@ -210,6 +211,7 @@ async fn serve(
         .route("/", get(index))
         .route("/mobile.css", get(styles))
         .route("/mobile.js", get(script))
+        .route("/mobile-view.js", get(view_script))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/routines", post(api_save_routine))
         .route("/api/routines/{routine_id}/runs", get(api_runs))
@@ -248,6 +250,13 @@ async fn script() -> impl IntoResponse {
     (
         no_store_headers("application/javascript; charset=utf-8"),
         MOBILE_JS,
+    )
+}
+
+async fn view_script() -> impl IntoResponse {
+    (
+        no_store_headers("application/javascript; charset=utf-8"),
+        MOBILE_VIEW_JS,
     )
 }
 
