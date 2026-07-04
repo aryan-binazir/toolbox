@@ -6,7 +6,7 @@ import {
   renderMobileApp,
   routineDraftFromForm,
   routineFromForm,
-} from "/mobile-view.js?v=20260704-mobile-sidebar-shell";
+} from "/mobile-view.js?v=20260704-mobile-sidebar-shell-polish";
 
 const app = document.querySelector("#app");
 

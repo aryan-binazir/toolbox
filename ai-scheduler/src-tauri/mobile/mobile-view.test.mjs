@@ -78,6 +78,8 @@ test("mobile list page is the desktop sidebar promoted to the whole screen", () 
   assert.match(html, />Runners</);
   assert.match(html, /Current routine/);
   assert.match(html, /ai-scheduler - Codex/);
+  assert.match(html, /data-action="pause" data-id="rtn_current"/);
+  assert.match(html, /data-action="pause" data-id="rtn_paused"/);
   assert.match(html, /Next ·/);
   assert.match(html, /Paused routine/);
   assert.doesNotMatch(html, /class="layout"/);
@@ -118,6 +120,7 @@ test("mobile routine detail is a full-screen page with back navigation and inlin
   assert.match(html, />Runs</);
   assert.match(html, /run_1/);
   assert.match(html, /succeeded/);
+  assert.doesNotMatch(html, /<button class="icon-button" data-action="edit-routine"/);
   assert.doesNotMatch(html, /class="layout"/);
   assert.doesNotMatch(html, /side-panel/);
 });
@@ -137,6 +140,7 @@ test("mobile edit page is full-screen and keeps the full routine form", () => {
 
   assert.match(html, /data-view="edit"/);
   assert.match(html, /data-action="back-to-detail"/);
+  assert.doesNotMatch(html, />Edit routine</);
   assert.match(html, /<form id="routine-form"/);
   assert.match(html, /name="title"/);
   assert.match(html, /name="prompt"/);

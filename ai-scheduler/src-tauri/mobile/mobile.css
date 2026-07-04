@@ -210,8 +210,8 @@ button:disabled {
   width: 100%;
   min-height: 86px;
   display: grid;
-  grid-template-columns: 26px 1fr;
-  gap: 12px;
+  grid-template-columns: 34px 1fr;
+  gap: 10px;
   text-align: left;
   border: 1px solid transparent;
   border-radius: 7px;
@@ -226,14 +226,13 @@ button:disabled {
 }
 
 .pause-dot {
-  width: 14px;
-  height: 14px;
-  margin-top: 4px;
+  width: 34px;
+  min-height: 62px;
   display: inline-grid;
   place-items: center;
   color: var(--accent-2);
-  border: 1px solid var(--line-strong);
-  border-radius: 50%;
+  border-right: 1px solid var(--line);
+  border-radius: 6px 0 0 6px;
   font-size: 10px;
 }
 

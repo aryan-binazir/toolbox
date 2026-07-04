@@ -175,9 +175,12 @@ function renderRoutineSection(title, routines) {
 }
 
 function renderRoutineRow(routine) {
+  const pauseTitle = routine.paused ? "Resume routine" : "Pause routine";
   return `
     <button class="routine-row" data-action="select" data-id="${escapeAttribute(routine.id)}">
-      <span class="pause-dot">${routine.paused ? "▷" : ""}</span>
+      <span class="pause-dot" data-action="pause" data-id="${escapeAttribute(routine.id)}" title="${escapeAttribute(pauseTitle)}" aria-label="${escapeAttribute(pauseTitle)}">
+        ${routine.paused ? "▷" : ""}
+      </span>
       <span class="routine-copy">
         <span class="routine-title">${escapeHtml(routine.title)}</span>
         <span class="routine-project">${escapeHtml(`${routine.project_label} - ${routine.runner_label}`)}</span>
@@ -231,7 +234,6 @@ function renderDetailPage(state) {
     <main class="mobile-shell detail-page" data-view="detail">
       <header class="page-head">
         <button class="back-button" data-action="back-to-list">Back</button>
-        <button class="icon-button" data-action="edit-routine" data-id="${escapeAttribute(routine.id)}" title="Edit routine">Edit</button>
       </header>
       ${state.error ? `<div class="alert">${escapeHtml(state.error)}</div>` : ""}
       <article class="routine-detail">
@@ -298,7 +300,7 @@ function renderEditorPage(state) {
     <main class="mobile-shell editor-page" data-view="${escapeAttribute(state.mode)}">
       <header class="page-head">
         <button class="back-button" data-action="${state.mode === "new" ? "back-to-list" : "back-to-detail"}">Back</button>
-        <h1>${state.mode === "new" ? "New routine" : "Edit routine"}</h1>
+        ${state.mode === "new" ? "<h1>New routine</h1>" : ""}
       </header>
       ${state.error ? `<div class="alert">${escapeHtml(state.error)}</div>` : ""}
       ${routine ? renderRoutineForm(routine, state) : `<div class="muted-row">No routine selected</div>`}
