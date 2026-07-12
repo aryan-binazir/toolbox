@@ -88,14 +88,25 @@ pub struct RunnerConfig {
     pub default_timeout_seconds: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunnerKind {
     Codex,
     Claude,
     Cursor,
+    Script,
     #[default]
     Custom,
+}
+
+impl RunnerConfig {
+    pub fn uses_model(&self) -> bool {
+        self.args.iter().any(|arg| arg.contains("{{model}}"))
+    }
+
+    pub fn is_script_like(&self) -> bool {
+        matches!(self.kind, RunnerKind::Script | RunnerKind::Custom) && !self.uses_model()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -390,12 +401,17 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
                 id, routine.runner
             ));
         }
-        if routine
-            .model
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
+        let runner = config
+            .runners
+            .iter()
+            .find(|runner| runner.id == routine.runner);
+        if runner.is_some_and(RunnerConfig::uses_model)
+            && routine
+                .model
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
         {
             return validation(format!("routine `{id}` model must not be empty"));
         }
@@ -518,6 +534,20 @@ pub fn builtin_default_config() -> AppConfig {
                     option("composer-2.5", "Composer 2.5"),
                     option("composer-2.5-fast", "Composer 2.5 Fast"),
                 ],
+                effort_options: vec![],
+                stdin: StdinMode::Null,
+                default_timeout_seconds: Some(DEFAULT_TIMEOUT_SECONDS),
+            },
+            RunnerConfig {
+                id: "script".to_string(),
+                label: "Script".to_string(),
+                command: "bash".to_string(),
+                kind: RunnerKind::Script,
+                args: vec!["-lc".to_string(), "{{prompt}}".to_string()],
+                dangerous_flag: None,
+                default_model: None,
+                default_effort: None,
+                model_options: vec![],
                 effort_options: vec![],
                 stdin: StdinMode::Null,
                 default_timeout_seconds: Some(DEFAULT_TIMEOUT_SECONDS),
@@ -765,6 +795,34 @@ schedule = "0 9 * * Mon,Wed,Fri"
         );
 
         load_config_from_str(&text).unwrap();
+    }
+
+    #[test]
+    fn accepts_script_routine_without_model() {
+        let cwd = tempfile::tempdir().unwrap();
+        let text = format!(
+            r#"
+[[runners]]
+id = "script"
+label = "Script"
+command = "bash"
+kind = "script"
+args = ["-lc", "{{{{prompt}}}}"]
+
+[[routines]]
+id = "rtn_script"
+title = "Script routine"
+prompt = "echo hello"
+runner = "script"
+cwd = "{}"
+schedule = "0 9 * * *"
+"#,
+            cwd.path().display()
+        );
+
+        let loaded = load_config_from_str(&text).unwrap();
+        assert_eq!(loaded.config.routines[0].runner, "script");
+        assert!(loaded.config.routines[0].model.is_none());
     }
 
     #[test]

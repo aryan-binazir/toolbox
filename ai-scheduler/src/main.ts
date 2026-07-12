@@ -234,6 +234,12 @@ function runnerFor(routine: RoutineConfig | undefined): RunnerConfig | undefined
   return state.snapshot?.config.runners.find((runner) => runner.id === routine.runner);
 }
 
+function isScriptLikeRunner(runner?: RunnerConfig | null) {
+  if (!runner) return false;
+  if (runner.kind === "script") return true;
+  return (runner.kind === "custom" || !runner.kind) && !(runner.default_model || runner.model_options?.length);
+}
+
 function capabilityFor(runnerId: string): RunnerCapability | undefined {
   return state.snapshot?.runner_capabilities.find((runner) => runner.id === runnerId);
 }
@@ -506,9 +512,13 @@ function renderDetail(routine: RoutineConfig, runner?: RunnerConfig, capability?
         <div><dt>Status</dt><dd>${running ? `Running · ${running.status}` : routine.paused ? "Paused" : "Active"}</dd></div>
         <div><dt>Runner</dt><dd>${escapeHtml(runner?.label ?? routine.runner)}</dd></div>
         <div><dt>Available</dt><dd>${capability?.available ? "Yes" : "No"}</dd></div>
-        <div><dt>Model</dt><dd>${escapeHtml(routine.model || runner?.default_model || "—")}</dd></div>
+        ${
+          isScriptLikeRunner(runner)
+            ? ""
+            : `<div><dt>Model</dt><dd>${escapeHtml(routine.model || runner?.default_model || "—")}</dd></div>
         <div><dt>Effort</dt><dd>${escapeHtml(routine.effort || runner?.default_effort || "—")}</dd></div>
-        <div><dt>Dangerous</dt><dd>${escapeHtml(routine.dangerous ? `On · ${runner?.dangerous_flag || "runner flag"}` : "Off")}</dd></div>
+        <div><dt>Dangerous</dt><dd>${escapeHtml(routine.dangerous ? `On · ${runner?.dangerous_flag || "runner flag"}` : "Off")}</dd></div>`
+        }
         <div><dt>Working directory</dt><dd>${escapeHtml(routine.cwd)}</dd></div>
         <div><dt>Schedule</dt><dd>${escapeHtml(scheduleLabel(routine))}</dd></div>
         <div><dt>Next run</dt><dd>${escapeHtml(nextRun)}</dd></div>
@@ -569,6 +579,7 @@ function renderRoutineForm(routine: RoutineConfig) {
   const timeoutSeconds = routine.timeout_seconds ?? config.settings.default_timeout_seconds;
   const schedule = parseScheduleControls(routine.schedule);
   const modelListId = `model-options-${escapeAttribute(runner?.id ?? "runner")}`;
+  const scriptLike = isScriptLikeRunner(runner);
   return `
     <form class="routine-form" id="routine-form">
       <div class="detail-toolbar">
@@ -578,12 +589,16 @@ function renderRoutineForm(routine: RoutineConfig) {
       <input type="hidden" name="id" value="${escapeHtml(routine.id || "")}" />
       <label>Title<input name="title" value="${escapeHtml(routine.title)}" required /></label>
       <label>Description<textarea name="description">${escapeHtml(routine.description)}</textarea></label>
-      <label>Prompt<textarea name="prompt" class="prompt-input" required>${escapeHtml(routine.prompt)}</textarea></label>
+      <label>${scriptLike ? "Command" : "Prompt"}<textarea name="prompt" class="prompt-input" required placeholder="${scriptLike ? "echo hello || /path/to/script.sh" : ""}">${escapeHtml(routine.prompt)}</textarea></label>
       <div class="form-grid">
         <label>Runner<select name="runner">${config.runners.map((item) => optionHtml(item.id, item.label, routine.runner)).join("")}</select></label>
-        <label>Model<input name="model" list="${modelListId}" value="${escapeHtml(routine.model || runner?.default_model || "")}" required /></label>
+        ${
+          scriptLike
+            ? ""
+            : `<label>Model<input name="model" list="${modelListId}" value="${escapeHtml(routine.model || runner?.default_model || "")}" required /></label>
         <datalist id="${modelListId}">${models.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join("")}</datalist>
-        <label>Effort<select name="effort"><option value="">—</option>${efforts.map((item) => optionHtml(item.value, item.label, routine.effort || runner?.default_effort)).join("")}</select></label>
+        <label>Effort<select name="effort"><option value="">—</option>${efforts.map((item) => optionHtml(item.value, item.label, routine.effort || runner?.default_effort)).join("")}</select></label>`
+        }
         ${renderScheduleDayControls(schedule)}
         ${
           schedule.customEnabled
@@ -602,12 +617,18 @@ function renderRoutineForm(routine: RoutineConfig) {
       </label>
       <div class="toggles">
         <label><input type="checkbox" name="paused" ${routine.paused ? "checked" : ""} /> Paused</label>
-        <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous mode</label>
+        ${
+          scriptLike
+            ? ""
+            : `<label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous mode</label>`
+        }
       </div>
       ${
-        runner?.dangerous_flag
+        !scriptLike && runner?.dangerous_flag
           ? `<div class="inline-note">Danger flag · ${escapeHtml(runner.dangerous_flag)}</div>`
-          : ""
+          : scriptLike
+            ? `<div class="inline-note">Runs as bash -lc in the working directory</div>`
+            : ""
       }
     </form>
   `;
@@ -1070,6 +1091,12 @@ function scheduleDaysFromForm(data: FormData, fallbackDays: string[]) {
 
 function applyRunnerDefaults(routine: RoutineConfig) {
   const runner = state.snapshot?.config.runners.find((item) => item.id === routine.runner);
+  if (isScriptLikeRunner(runner)) {
+    routine.model = null;
+    routine.effort = null;
+    routine.dangerous = false;
+    return;
+  }
   routine.model = runner?.default_model ?? null;
   routine.effort = runner?.default_effort ?? null;
 }

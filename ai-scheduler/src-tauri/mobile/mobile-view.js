@@ -313,17 +313,22 @@ function renderRoutineForm(routine, state) {
   const models = runner?.models || [];
   const efforts = runner?.efforts || [];
   const schedule = parseScheduleControls(routine.schedule || "0 7 * * *");
+  const scriptLike = isScriptLikeRunner(runner);
 
   return `
     <form id="routine-form" class="routine-form">
       <input type="hidden" name="id" value="${escapeAttribute(routine.id || "")}" />
       <label class="form-title">Title<input name="title" value="${escapeAttribute(routine.title || "")}" required /></label>
       <label class="form-description">Description<textarea name="description">${escapeHtml(routine.description || "")}</textarea></label>
-      <label class="form-prompt">Prompt<textarea class="prompt-input" name="prompt" required>${escapeHtml(routine.prompt || "")}</textarea></label>
+      <label class="form-prompt">${scriptLike ? "Command" : "Prompt"}<textarea class="prompt-input" name="prompt" required placeholder="${scriptLike ? "echo hello || /path/to/script.sh" : ""}">${escapeHtml(routine.prompt || "")}</textarea></label>
       <div class="form-grid">
         <label>Runner<select name="runner">${(state.snapshot?.runners || []).map((item) => optionHtml(item.id, item.label, routine.runner_id)).join("")}</select></label>
-        <label>Model<select name="model">${models.map((item) => optionHtml(item.value, item.label, routine.model)).join("")}</select></label>
-        <label>Effort<select name="effort">${efforts.length ? efforts.map((item) => optionHtml(item.value, item.label, routine.effort)).join("") : `<option value="">None</option>`}</select></label>
+        ${
+          scriptLike
+            ? ""
+            : `<label>Model<select name="model">${models.map((item) => optionHtml(item.value, item.label, routine.model)).join("")}</select></label>
+        <label>Effort<select name="effort">${efforts.length ? efforts.map((item) => optionHtml(item.value, item.label, routine.effort)).join("") : `<option value="">None</option>`}</select></label>`
+        }
       </div>
       <label class="form-cwd">Working directory<input name="cwd" value="${escapeAttribute(routine.cwd || "")}" required /></label>
       <div class="form-grid">
@@ -338,14 +343,22 @@ function renderRoutineForm(routine, state) {
       </div>
       <div class="check-row">
         <label><input type="checkbox" name="paused" ${routine.paused ? "checked" : ""} /> Paused</label>
-        <label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous</label>
+        ${scriptLike ? "" : `<label><input type="checkbox" name="dangerous" ${routine.dangerous ? "checked" : ""} /> Dangerous</label>`}
       </div>
+      ${scriptLike ? `<div class="inline-note">Runs as bash -lc in the working directory</div>` : ""}
       <div class="form-actions">
         <button type="button" data-action="${state.mode === "new" ? "back-to-list" : "back-to-detail"}">Cancel</button>
         <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>Save routine</button>
       </div>
     </form>
   `;
+}
+
+function isScriptLikeRunner(runner) {
+  if (!runner) return false;
+  if (runner.kind === "script") return true;
+  if (runner.uses_model === false) return true;
+  return false;
 }
 
 function renderScheduleDayControls(schedule) {

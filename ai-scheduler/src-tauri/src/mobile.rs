@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::config::{OptionValue, RoutineConfig};
+use crate::config::{OptionValue, RoutineConfig, RunnerKind};
 use crate::process::ProcessError;
 use crate::scheduler::RoutineScheduleInfo;
 use crate::store::{RunRecord, RunStatus};
@@ -72,10 +72,12 @@ struct MobileSnapshot {
 struct MobileRunner {
     id: String,
     label: String,
+    kind: String,
     available: bool,
     models: Vec<OptionValue>,
     efforts: Vec<OptionValue>,
     dangerous_supported: bool,
+    uses_model: bool,
     default_model: Option<String>,
     default_effort: Option<String>,
     default_timeout_seconds: Option<u64>,
@@ -401,6 +403,7 @@ fn mobile_snapshot(state: &AppState) -> Result<MobileSnapshot, AppError> {
         .map(|runner| MobileRunner {
             id: runner.id.clone(),
             label: runner.label.clone(),
+            kind: runner_kind_label(runner.kind),
             available: runner_availability
                 .get(&runner.id)
                 .copied()
@@ -408,6 +411,7 @@ fn mobile_snapshot(state: &AppState) -> Result<MobileSnapshot, AppError> {
             models: runner.model_options.clone(),
             efforts: runner.effort_options.clone(),
             dangerous_supported: runner.dangerous_flag.is_some(),
+            uses_model: runner.uses_model(),
             default_model: runner.default_model.clone(),
             default_effort: runner.default_effort.clone(),
             default_timeout_seconds: runner.default_timeout_seconds,
@@ -437,6 +441,16 @@ fn mobile_snapshot(state: &AppState) -> Result<MobileSnapshot, AppError> {
         routines,
         runners,
     })
+}
+
+fn runner_kind_label(kind: RunnerKind) -> String {
+    match kind {
+        RunnerKind::Codex => "codex".to_string(),
+        RunnerKind::Claude => "claude".to_string(),
+        RunnerKind::Cursor => "cursor".to_string(),
+        RunnerKind::Script => "script".to_string(),
+        RunnerKind::Custom => "custom".to_string(),
+    }
 }
 
 fn mobile_routine(

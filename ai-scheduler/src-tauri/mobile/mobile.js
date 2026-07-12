@@ -133,8 +133,14 @@ app.addEventListener("change", (event) => {
     state.draft = draftFromCurrentForm(form);
     state.draft.runner_id = runner.id;
     state.draft.runner_label = runner.label;
-    state.draft.model = runner.default_model || runner.models?.[0]?.value || "";
-    state.draft.effort = runner.default_effort || runner.efforts?.[0]?.value || "";
+    if (runner.kind === "script" || runner.uses_model === false) {
+      state.draft.model = null;
+      state.draft.effort = null;
+      state.draft.dangerous = false;
+    } else {
+      state.draft.model = runner.default_model || runner.models?.[0]?.value || "";
+      state.draft.effort = runner.default_effort || runner.efforts?.[0]?.value || "";
+    }
     state.draft.timeout_seconds = runner.default_timeout_seconds || state.draft.timeout_seconds || null;
     render();
   } else if (event.target.name === "schedule_custom_enabled") {

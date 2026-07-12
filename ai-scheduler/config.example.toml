@@ -68,6 +68,15 @@ model_options = [
   { value = "composer-2.5-fast", label = "Composer 2.5 Fast" },
 ]
 
+[[runners]]
+id = "script"
+label = "Script"
+command = "bash"
+kind = "script"
+args = ["-lc", "{{prompt}}"]
+stdin = "null"
+default_timeout_seconds = 1800
+
 [[routines]]
 title = "Example routine"
 description = "Replace this with a real routine."

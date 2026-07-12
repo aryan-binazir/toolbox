@@ -140,7 +140,7 @@ pub fn probe_runner(runner: &RunnerConfig) -> RunnerCapability {
                 ];
             }
         }
-        RunnerKind::Custom => {}
+        RunnerKind::Script | RunnerKind::Custom => {}
     }
 
     capability

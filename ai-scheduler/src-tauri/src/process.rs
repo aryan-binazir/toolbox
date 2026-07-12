@@ -420,7 +420,10 @@ pub fn expand_args(
         .model
         .as_deref()
         .or(runner.default_model.as_deref())
-        .ok_or_else(|| ProcessError::MissingModel(runner.id.clone()))?;
+        .unwrap_or("");
+    if runner.uses_model() && model.is_empty() {
+        return Err(ProcessError::MissingModel(runner.id.clone()));
+    }
     let effort = routine
         .effort
         .as_deref()
@@ -591,6 +594,44 @@ mod tests {
         assert_eq!(
             expand_args(&runner, &routine).unwrap(),
             vec!["--print", "--force", "--model", "composer-2.5", "Do it."]
+        );
+    }
+
+    #[test]
+    fn expands_script_args_without_model() {
+        let runner = RunnerConfig {
+            id: "script".to_string(),
+            label: "Script".to_string(),
+            command: "bash".to_string(),
+            kind: RunnerKind::Script,
+            args: vec!["-lc".to_string(), "{{prompt}}".to_string()],
+            dangerous_flag: None,
+            default_model: None,
+            default_effort: None,
+            model_options: vec![],
+            effort_options: vec![],
+            stdin: StdinMode::Null,
+            default_timeout_seconds: None,
+        };
+        let routine = RoutineConfig {
+            id: Some("rtn_script".to_string()),
+            title: "Script".to_string(),
+            description: String::new(),
+            prompt: "echo hello".to_string(),
+            runner: "script".to_string(),
+            model: None,
+            effort: None,
+            cwd: PathBuf::from("/tmp"),
+            schedule: "0 7 * * *".to_string(),
+            timezone: None,
+            paused: false,
+            dangerous: false,
+            timeout_seconds: None,
+        };
+
+        assert_eq!(
+            expand_args(&runner, &routine).unwrap(),
+            vec!["-lc", "echo hello"]
         );
     }
 
