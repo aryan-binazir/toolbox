@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::env;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -260,6 +262,7 @@ impl ProcessManager {
 
         let mut command = Command::new(&runner.command);
         command.args(&argv).current_dir(&routine.cwd);
+        apply_ssh_agent_env(&mut command);
         match runner.stdin {
             StdinMode::Null => {
                 command.stdin(Stdio::null());
@@ -538,6 +541,38 @@ fn kill_process_group(pgid: i32) {
     }
 }
 
+/// Desktop-launched apps often lack `SSH_AUTH_SOCK` even when a user agent is
+/// running. Forward a live agent socket into child processes so git/SSH work.
+fn apply_ssh_agent_env(command: &mut Command) {
+    if let Some(sock) = resolve_ssh_auth_sock() {
+        command.env("SSH_AUTH_SOCK", sock);
+    }
+}
+
+fn resolve_ssh_auth_sock() -> Option<PathBuf> {
+    if let Ok(existing) = env::var("SSH_AUTH_SOCK") {
+        let path = PathBuf::from(&existing);
+        if is_usable_ssh_sock(&path) {
+            return Some(path);
+        }
+    }
+
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    for candidate in [
+        runtime_dir.join("ssh-agent.socket"),
+        runtime_dir.join("keyring/ssh"),
+    ] {
+        if is_usable_ssh_sock(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_usable_ssh_sock(path: &Path) -> bool {
+    path.exists()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -633,6 +668,31 @@ mod tests {
             expand_args(&runner, &routine).unwrap(),
             vec!["-lc", "echo hello"]
         );
+    }
+
+    #[test]
+    fn resolves_ssh_auth_sock_from_xdg_runtime_dir() {
+        let runtime = tempfile::tempdir().unwrap();
+        let sock = runtime.path().join("ssh-agent.socket");
+        std::os::unix::net::UnixListener::bind(&sock).unwrap();
+
+        let previous_sock = env::var_os("SSH_AUTH_SOCK");
+        let previous_runtime = env::var_os("XDG_RUNTIME_DIR");
+        env::remove_var("SSH_AUTH_SOCK");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let resolved = resolve_ssh_auth_sock();
+
+        match previous_sock {
+            Some(value) => env::set_var("SSH_AUTH_SOCK", value),
+            None => env::remove_var("SSH_AUTH_SOCK"),
+        }
+        match previous_runtime {
+            Some(value) => env::set_var("XDG_RUNTIME_DIR", value),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+
+        assert_eq!(resolved.as_deref(), Some(sock.as_path()));
     }
 
     #[test]
