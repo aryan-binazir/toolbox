@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Unlock AI Scheduler</title>
+    <link rel="stylesheet" href="/mobile.css?v=__MOBILE_ASSET_VERSION__" />
+    <script type="module" src="/mobile-login.js?v=__MOBILE_ASSET_VERSION__"></script>
+  </head>
+  <body>
+    <main class="unlock-shell">
+      <form id="unlock-form" class="unlock-card">
+        <span class="unlock-mark" aria-hidden="true"></span>
+        <p class="eyebrow">AI Scheduler</p>
+        <h1>Enter passcode</h1>
+        <p class="unlock-copy">This unlock lasts five minutes.</p>
+        <label for="mobile-passcode">Numeric passcode</label>
+        <input
+          id="mobile-passcode"
+          name="passcode"
+          type="password"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          minlength="6"
+          maxlength="12"
+          autocomplete="current-password"
+          required
+        />
+        <p id="unlock-error" class="unlock-error" role="alert" aria-live="polite"></p>
+        <button class="primary wide" type="submit">Unlock</button>
+      </form>
+    </main>
+  </body>
+</html>

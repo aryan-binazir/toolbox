@@ -262,10 +262,10 @@ impl AppState {
         if let Some(handle) = current.take() {
             handle.stop();
         }
-        *current = Some(mobile::start_mobile_server(
-            self.clone(),
-            settings.mobile_web_port,
-        ));
+        match mobile::start_mobile_server(self.clone(), settings.mobile_web_port) {
+            Ok(handle) => *current = Some(handle),
+            Err(error) => eprintln!("AI Scheduler mobile web not started: {error}"),
+        }
     }
 
     fn set_config(&self, config: AppConfig) {

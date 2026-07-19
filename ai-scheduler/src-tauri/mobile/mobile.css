@@ -97,6 +97,84 @@ button:disabled {
   background: var(--accent);
 }
 
+.unlock-shell {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: max(24px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom));
+}
+
+.unlock-card {
+  width: min(100%, 380px);
+  padding: 30px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.32);
+}
+
+.unlock-mark {
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin-bottom: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.unlock-card .eyebrow {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.unlock-card h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 600;
+}
+
+.unlock-copy {
+  margin: 10px 0 28px;
+  color: var(--muted);
+}
+
+.unlock-card label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.unlock-card input {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 14px;
+  color: var(--text);
+  background: #101210;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  font-size: 24px;
+  letter-spacing: 0.2em;
+  outline: none;
+}
+
+.unlock-card input:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(215, 247, 161, 0.1);
+}
+
+.unlock-error {
+  min-height: 20px;
+  margin: 10px 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
 .mobile-shell {
   min-height: 100dvh;
   padding: max(22px, env(safe-area-inset-top)) 18px max(26px, env(safe-area-inset-bottom));

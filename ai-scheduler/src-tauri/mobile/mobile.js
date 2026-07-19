@@ -22,6 +22,11 @@ const state = {
   error: "",
 };
 
+const sessionExpiresInMs = Number(document.documentElement.dataset.sessionExpiresInMs);
+if (Number.isFinite(sessionExpiresInMs)) {
+  setTimeout(() => window.location.reload(), Math.max(0, sessionExpiresInMs));
+}
+
 const mutationHeaders = {
   "Content-Type": "application/json",
   "X-AI-Scheduler-Mobile": "1",
@@ -221,6 +226,10 @@ async function requestJson(path, options = {}) {
       ...(options.headers || {}),
     },
   });
+  if (response.status === 401) {
+    window.location.reload();
+    return new Promise(() => {});
+  }
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {

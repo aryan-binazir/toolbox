@@ -1,13 +1,18 @@
 use std::collections::HashMap;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+#[cfg(not(test))]
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
-use axum::extract::{Path as RoutePath, State};
+use axum::extract::{Path as RoutePath, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{middleware, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -22,9 +27,13 @@ const INDEX_HTML: &str = include_str!("../mobile/index.html");
 const MOBILE_CSS: &str = include_str!("../mobile/mobile.css");
 const MOBILE_JS: &str = include_str!("../mobile/mobile.js");
 const MOBILE_VIEW_JS: &str = include_str!("../mobile/mobile-view.js");
-const ASSET_VERSION: &str = "20260704-mobile-web-full-width";
+const MOBILE_LOGIN_JS: &str = include_str!("../mobile/mobile-login.js");
+const LOGIN_HTML: &str = include_str!("../mobile/login.html");
+const ASSET_VERSION: &str = "20260719-mobile-web-passcode";
 const MUTATION_HEADER: &str = "x-ai-scheduler-mobile";
 const MUTATION_HEADER_VALUE: &str = "1";
+const SESSION_COOKIE: &str = "ai_scheduler_mobile_session";
+const SESSION_DURATION: Duration = Duration::from_secs(5 * 60);
 const OUTPUT_PREVIEW_BYTES: usize = 6 * 1024;
 const RUN_HISTORY_LIMIT: usize = 20;
 
@@ -58,6 +67,102 @@ impl Drop for MobileServerHandle {
 #[derive(Clone)]
 struct MobileServerState {
     app: AppState,
+    auth: Arc<MobileAuth>,
+}
+
+struct MobileAuth {
+    passcode: PasscodeSource,
+    sessions: Mutex<HashMap<String, Instant>>,
+    throttle: Mutex<AuthThrottle>,
+    session_duration: Duration,
+}
+
+#[derive(Default)]
+struct AuthThrottle {
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+enum Authentication {
+    Authenticated(String),
+    Rejected,
+    Throttled(Duration),
+}
+
+enum PasscodeSource {
+    #[cfg(not(test))]
+    File(PathBuf),
+    #[cfg(test)]
+    Fixed(String),
+}
+
+impl MobileAuth {
+    #[cfg(not(test))]
+    fn from_file(path: PathBuf) -> Result<Self, String> {
+        read_mobile_passcode(&path)?;
+        Ok(Self {
+            passcode: PasscodeSource::File(path),
+            sessions: Mutex::new(HashMap::new()),
+            throttle: Mutex::new(AuthThrottle::default()),
+            session_duration: SESSION_DURATION,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_passcode(passcode: &str, session_duration: Duration) -> Self {
+        Self {
+            passcode: PasscodeSource::Fixed(passcode.to_string()),
+            sessions: Mutex::new(HashMap::new()),
+            throttle: Mutex::new(AuthThrottle::default()),
+            session_duration,
+        }
+    }
+
+    fn authenticate(&self, supplied: &str) -> Result<Authentication, String> {
+        let now = Instant::now();
+        let mut throttle = self.throttle.lock().expect("mobile auth lock poisoned");
+        if let Some(remaining) = throttle
+            .retry_at
+            .and_then(|retry_at| retry_at.checked_duration_since(now))
+        {
+            return Ok(Authentication::Throttled(remaining));
+        }
+
+        let expected = match &self.passcode {
+            #[cfg(not(test))]
+            PasscodeSource::File(path) => read_mobile_passcode(path)?,
+            #[cfg(test)]
+            PasscodeSource::Fixed(passcode) => passcode.clone(),
+        };
+        if !constant_time_eq(expected.as_bytes(), supplied.as_bytes()) {
+            throttle.failures = throttle.failures.saturating_add(1);
+            let delay_seconds = 1_u64
+                .checked_shl(throttle.failures.saturating_sub(1).min(5))
+                .unwrap_or(32)
+                .min(30);
+            throttle.retry_at = Some(now + Duration::from_secs(delay_seconds));
+            return Ok(Authentication::Rejected);
+        }
+
+        *throttle = AuthThrottle::default();
+        drop(throttle);
+
+        let token = nanoid::nanoid!(32);
+        let mut sessions = self.sessions.lock().expect("mobile auth lock poisoned");
+        sessions.retain(|_, expires_at| *expires_at > now);
+        sessions.insert(token.clone(), now + self.session_duration);
+        Ok(Authentication::Authenticated(token))
+    }
+
+    fn session_remaining(&self, headers: &HeaderMap) -> Option<Duration> {
+        let token = session_cookie(headers)?;
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().expect("mobile auth lock poisoned");
+        sessions.retain(|_, expires_at| *expires_at > now);
+        sessions
+            .get(token)
+            .and_then(|expires_at| expires_at.checked_duration_since(now))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +237,11 @@ struct PauseRequest {
     paused: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct UnlockRequest {
+    passcode: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -144,6 +254,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
     fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -178,7 +295,12 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn start_mobile_server(app: AppState, port: u16) -> MobileServerHandle {
+pub fn start_mobile_server(app: AppState, port: u16) -> Result<MobileServerHandle, String> {
+    #[cfg(not(test))]
+    let auth = MobileAuth::from_file(mobile_passcode_path())?;
+    #[cfg(test)]
+    let auth = MobileAuth::from_passcode("000000", SESSION_DURATION);
+
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -192,28 +314,28 @@ pub fn start_mobile_server(app: AppState, port: u16) -> MobileServerHandle {
             }
         };
 
-        if let Err(error) = runtime.block_on(serve(app, port, shutdown_rx)) {
+        if let Err(error) = runtime.block_on(serve(app, auth, port, shutdown_rx)) {
             eprintln!("AI Scheduler mobile server stopped: {error}");
         }
     });
 
-    MobileServerHandle {
+    Ok(MobileServerHandle {
         port,
         shutdown: Some(shutdown_tx),
-    }
+    })
 }
 
 async fn serve(
     app: AppState,
+    auth: MobileAuth,
     port: u16,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), std::io::Error> {
-    let state = MobileServerState { app };
-    let router = Router::new()
-        .route("/", get(index))
-        .route("/mobile.css", get(styles))
-        .route("/mobile.js", get(script))
-        .route("/mobile-view.js", get(view_script))
+    let state = MobileServerState {
+        app,
+        auth: Arc::new(auth),
+    };
+    let protected_api = Router::new()
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/routines", post(api_save_routine))
         .route("/api/routines/{routine_id}/runs", get(api_runs))
@@ -225,6 +347,18 @@ async fn serve(
             post(api_delete_routine),
         )
         .route("/api/runners/refresh", post(api_refresh_runners))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_mobile_auth,
+        ));
+    let router = Router::new()
+        .route("/", get(index))
+        .route("/mobile.css", get(styles))
+        .route("/mobile.js", get(script))
+        .route("/mobile-view.js", get(view_script))
+        .route("/mobile-login.js", get(login_script))
+        .route("/api/unlock", post(api_unlock))
+        .merge(protected_api)
         .fallback(not_found)
         .with_state(state);
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
@@ -237,11 +371,18 @@ async fn serve(
         .await
 }
 
-async fn index() -> impl IntoResponse {
-    (
-        no_store_headers("text/html; charset=utf-8"),
-        Html(INDEX_HTML.replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)),
-    )
+async fn index(State(state): State<MobileServerState>, headers: HeaderMap) -> Response {
+    let html = if let Some(remaining) = state.auth.session_remaining(&headers) {
+        INDEX_HTML
+            .replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)
+            .replace(
+                "__MOBILE_SESSION_EXPIRES_IN_MS__",
+                &remaining.as_millis().to_string(),
+            )
+    } else {
+        login_html()
+    };
+    (no_store_headers("text/html; charset=utf-8"), Html(html)).into_response()
 }
 
 async fn styles() -> impl IntoResponse {
@@ -260,6 +401,110 @@ async fn view_script() -> impl IntoResponse {
         no_store_headers("application/javascript; charset=utf-8"),
         MOBILE_VIEW_JS,
     )
+}
+
+async fn login_script() -> impl IntoResponse {
+    (
+        no_store_headers("application/javascript; charset=utf-8"),
+        MOBILE_LOGIN_JS,
+    )
+}
+
+async fn require_mobile_auth(
+    State(state): State<MobileServerState>,
+    request: Request,
+    next: middleware::Next,
+) -> Response {
+    if state.auth.session_remaining(request.headers()).is_some() {
+        next.run(request).await
+    } else {
+        ApiError::unauthorized("mobile session expired or missing").into_response()
+    }
+}
+
+async fn api_unlock(
+    State(state): State<MobileServerState>,
+    Json(request): Json<UnlockRequest>,
+) -> Result<Response, ApiError> {
+    let authentication = state
+        .auth
+        .authenticate(request.passcode.trim())
+        .map_err(|message| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        })?;
+    let token = match authentication {
+        Authentication::Authenticated(token) => token,
+        Authentication::Rejected => return Err(ApiError::unauthorized("incorrect passcode")),
+        Authentication::Throttled(remaining) => {
+            return Err(ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: format!(
+                    "too many incorrect attempts; try again in {} seconds",
+                    remaining.as_secs().saturating_add(1)
+                ),
+            });
+        }
+    };
+    let cookie = format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        SESSION_DURATION.as_secs()
+    );
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie
+            .parse()
+            .expect("session cookie must be a valid header"),
+    );
+    Ok(response)
+}
+
+fn login_html() -> String {
+    LOGIN_HTML.replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)
+}
+
+#[cfg(not(test))]
+fn mobile_passcode_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("Cargo manifest directory must have a repository parent")
+        .join(".mobile-passcode")
+}
+
+fn read_mobile_passcode(path: &Path) -> Result<String, String> {
+    let passcode = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read mobile passcode {}: {error}", path.display()))?;
+    let passcode = passcode.trim();
+    if !(6..=12).contains(&passcode.len()) || !passcode.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "mobile passcode {} must contain 6-12 digits",
+            path.display()
+        ));
+    }
+    Ok(passcode.to_string())
+}
+
+fn constant_time_eq(expected: &[u8], supplied: &[u8]) -> bool {
+    let mut difference = expected.len() ^ supplied.len();
+    let length = expected.len().max(supplied.len());
+    for index in 0..length {
+        difference |= usize::from(
+            expected.get(index).copied().unwrap_or_default()
+                ^ supplied.get(index).copied().unwrap_or_default(),
+        );
+    }
+    difference == 0
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|cookie| cookie.trim().split_once('='))
+        .find_map(|(name, value)| (name == SESSION_COOKIE).then_some(value))
 }
 
 async fn not_found() -> impl IntoResponse {
@@ -560,6 +805,17 @@ fn project_label(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn session_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("other=value; {SESSION_COOKIE}={token}")
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
     #[test]
     fn caps_output_preview_on_char_boundary() {
         let (value, capped) = capped_preview("abcde", 3);
@@ -576,5 +832,63 @@ mod tests {
         let headers = HeaderMap::new();
         let error = verify_mutation_request(&headers).unwrap_err();
         assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn reads_only_numeric_passcodes_with_supported_lengths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("passcode");
+
+        fs::write(&path, "123456\n").unwrap();
+        assert_eq!(read_mobile_passcode(&path).unwrap(), "123456");
+
+        fs::write(&path, "12345").unwrap();
+        assert!(read_mobile_passcode(&path).is_err());
+
+        fs::write(&path, "12345a").unwrap();
+        assert!(read_mobile_passcode(&path).is_err());
+    }
+
+    #[test]
+    fn authenticates_passcode_and_expires_fixed_session() {
+        let auth = MobileAuth::from_passcode("123456", Duration::from_secs(300));
+
+        assert!(matches!(
+            auth.authenticate("654321").unwrap(),
+            Authentication::Rejected
+        ));
+        auth.throttle.lock().unwrap().retry_at = None;
+        let Authentication::Authenticated(token) = auth.authenticate("123456").unwrap() else {
+            panic!("expected successful authentication");
+        };
+        let headers = session_headers(&token);
+        assert!(auth.session_remaining(&headers).is_some());
+
+        auth.sessions
+            .lock()
+            .unwrap()
+            .insert(token, Instant::now() - Duration::from_secs(1));
+        assert!(auth.session_remaining(&headers).is_none());
+    }
+
+    #[test]
+    fn throttles_repeated_passcode_attempts() {
+        let auth = MobileAuth::from_passcode("123456", Duration::from_secs(300));
+
+        assert!(matches!(
+            auth.authenticate("000000").unwrap(),
+            Authentication::Rejected
+        ));
+        assert!(matches!(
+            auth.authenticate("123456").unwrap(),
+            Authentication::Throttled(_)
+        ));
+    }
+
+    #[test]
+    fn passcode_comparison_includes_length() {
+        assert!(constant_time_eq(b"123456", b"123456"));
+        assert!(!constant_time_eq(b"123456", b"123457"));
+        assert!(!constant_time_eq(b"123456", b"1234560"));
     }
 }

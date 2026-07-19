@@ -51,8 +51,14 @@ mobile_web_port = 6882
 
 When enabled, the desktop app binds a mobile web UI/API to
 `http://127.0.0.1:6882` while the app is open. When disabled, no HTTP listener
-is started. The mobile surface can view, create, edit, pause, resume, delete,
-run, and cancel routines, and can refresh runner status checks.
+is started. HTTP access requires the numeric passcode stored in the gitignored
+`.mobile-passcode` file at the repository root. The file must contain 6-12
+digits. An unlocked browser session expires after five minutes, regardless of
+activity. Passcode-file changes apply to the next unlock without rebuilding or
+restarting the app. Keep the file private with `chmod 600 .mobile-passcode`.
+Incorrect unlock attempts are progressively throttled. The mobile surface can
+view, create, edit, pause, resume,
+delete, run, and cancel routines, and can refresh runner status checks.
 
 External config-file edits are applied on the next app launch. In-app raw config
 saves reconcile the mobile server immediately.

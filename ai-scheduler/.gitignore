@@ -9,3 +9,4 @@ src-tauri/gen/
 *.log
 .env
 .env.*
+.mobile-passcode
