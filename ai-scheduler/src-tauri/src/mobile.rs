@@ -1,9 +1,10 @@
-use std::collections::HashMap;
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
-#[cfg(not(test))]
-use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,11 +30,11 @@ const MOBILE_JS: &str = include_str!("../mobile/mobile.js");
 const MOBILE_VIEW_JS: &str = include_str!("../mobile/mobile-view.js");
 const MOBILE_LOGIN_JS: &str = include_str!("../mobile/mobile-login.js");
 const LOGIN_HTML: &str = include_str!("../mobile/login.html");
-const ASSET_VERSION: &str = "20260719-mobile-web-passcode";
+const ASSET_VERSION: &str = "20260719-mobile-web-trusted-browser";
 const MUTATION_HEADER: &str = "x-ai-scheduler-mobile";
 const MUTATION_HEADER_VALUE: &str = "1";
-const SESSION_COOKIE: &str = "ai_scheduler_mobile_session";
-const SESSION_DURATION: Duration = Duration::from_secs(5 * 60);
+const TRUST_COOKIE: &str = "ai_scheduler_mobile_trust";
+const TRUST_COOKIE_MAX_AGE_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 const OUTPUT_PREVIEW_BYTES: usize = 6 * 1024;
 const RUN_HISTORY_LIMIT: usize = 20;
 
@@ -72,9 +73,9 @@ struct MobileServerState {
 
 struct MobileAuth {
     passcode: PasscodeSource,
-    sessions: Mutex<HashMap<String, Instant>>,
+    trusted_browsers_path: PathBuf,
+    trusted_tokens: Mutex<HashSet<String>>,
     throttle: Mutex<AuthThrottle>,
-    session_duration: Duration,
 }
 
 #[derive(Default)]
@@ -98,23 +99,25 @@ enum PasscodeSource {
 
 impl MobileAuth {
     #[cfg(not(test))]
-    fn from_file(path: PathBuf) -> Result<Self, String> {
-        read_mobile_passcode(&path)?;
+    fn from_file(passcode_path: PathBuf, trusted_browsers_path: PathBuf) -> Result<Self, String> {
+        read_mobile_passcode(&passcode_path)?;
+        let trusted_tokens = read_trusted_tokens(&trusted_browsers_path)?;
         Ok(Self {
-            passcode: PasscodeSource::File(path),
-            sessions: Mutex::new(HashMap::new()),
+            passcode: PasscodeSource::File(passcode_path),
+            trusted_browsers_path,
+            trusted_tokens: Mutex::new(trusted_tokens),
             throttle: Mutex::new(AuthThrottle::default()),
-            session_duration: SESSION_DURATION,
         })
     }
 
     #[cfg(test)]
-    fn from_passcode(passcode: &str, session_duration: Duration) -> Self {
+    fn from_passcode(passcode: &str, trusted_browsers_path: PathBuf) -> Self {
+        let trusted_tokens = read_trusted_tokens(&trusted_browsers_path).unwrap();
         Self {
             passcode: PasscodeSource::Fixed(passcode.to_string()),
-            sessions: Mutex::new(HashMap::new()),
+            trusted_browsers_path,
+            trusted_tokens: Mutex::new(trusted_tokens),
             throttle: Mutex::new(AuthThrottle::default()),
-            session_duration,
         }
     }
 
@@ -148,20 +151,28 @@ impl MobileAuth {
         drop(throttle);
 
         let token = nanoid::nanoid!(32);
-        let mut sessions = self.sessions.lock().expect("mobile auth lock poisoned");
-        sessions.retain(|_, expires_at| *expires_at > now);
-        sessions.insert(token.clone(), now + self.session_duration);
+        self.trust_browser(&token)?;
         Ok(Authentication::Authenticated(token))
     }
 
-    fn session_remaining(&self, headers: &HeaderMap) -> Option<Duration> {
-        let token = session_cookie(headers)?;
-        let now = Instant::now();
-        let mut sessions = self.sessions.lock().expect("mobile auth lock poisoned");
-        sessions.retain(|_, expires_at| *expires_at > now);
-        sessions
-            .get(token)
-            .and_then(|expires_at| expires_at.checked_duration_since(now))
+    fn is_trusted(&self, headers: &HeaderMap) -> bool {
+        let Some(token) = trust_cookie(headers) else {
+            return false;
+        };
+        self.trusted_tokens
+            .lock()
+            .expect("mobile auth lock poisoned")
+            .contains(token)
+    }
+
+    fn trust_browser(&self, token: &str) -> Result<(), String> {
+        let mut trusted_tokens = self
+            .trusted_tokens
+            .lock()
+            .expect("mobile auth lock poisoned");
+        append_trusted_token(&self.trusted_browsers_path, token)?;
+        trusted_tokens.insert(token.to_string());
+        Ok(())
     }
 }
 
@@ -297,9 +308,12 @@ impl IntoResponse for ApiError {
 
 pub fn start_mobile_server(app: AppState, port: u16) -> Result<MobileServerHandle, String> {
     #[cfg(not(test))]
-    let auth = MobileAuth::from_file(mobile_passcode_path())?;
+    let auth = MobileAuth::from_file(mobile_passcode_path(), trusted_browsers_path())?;
     #[cfg(test)]
-    let auth = MobileAuth::from_passcode("000000", SESSION_DURATION);
+    let auth = MobileAuth::from_passcode(
+        "000000",
+        std::env::temp_dir().join("ai-scheduler-unused-test-trusted-browsers"),
+    );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     thread::spawn(move || {
@@ -372,13 +386,8 @@ async fn serve(
 }
 
 async fn index(State(state): State<MobileServerState>, headers: HeaderMap) -> Response {
-    let html = if let Some(remaining) = state.auth.session_remaining(&headers) {
-        INDEX_HTML
-            .replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)
-            .replace(
-                "__MOBILE_SESSION_EXPIRES_IN_MS__",
-                &remaining.as_millis().to_string(),
-            )
+    let html = if state.auth.is_trusted(&headers) {
+        INDEX_HTML.replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)
     } else {
         login_html()
     };
@@ -415,10 +424,10 @@ async fn require_mobile_auth(
     request: Request,
     next: middleware::Next,
 ) -> Response {
-    if state.auth.session_remaining(request.headers()).is_some() {
+    if state.auth.is_trusted(request.headers()) {
         next.run(request).await
     } else {
-        ApiError::unauthorized("mobile session expired or missing").into_response()
+        ApiError::unauthorized("browser is not trusted").into_response()
     }
 }
 
@@ -447,8 +456,7 @@ async fn api_unlock(
         }
     };
     let cookie = format!(
-        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-        SESSION_DURATION.as_secs()
+        "{TRUST_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={TRUST_COOKIE_MAX_AGE_SECONDS}"
     );
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -466,10 +474,20 @@ fn login_html() -> String {
 
 #[cfg(not(test))]
 fn mobile_passcode_path() -> PathBuf {
+    repository_path(".mobile-passcode")
+}
+
+#[cfg(not(test))]
+fn trusted_browsers_path() -> PathBuf {
+    repository_path(".mobile-trusted-browsers")
+}
+
+#[cfg(not(test))]
+fn repository_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("Cargo manifest directory must have a repository parent")
-        .join(".mobile-passcode")
+        .join(name)
 }
 
 fn read_mobile_passcode(path: &Path) -> Result<String, String> {
@@ -497,14 +515,53 @@ fn constant_time_eq(expected: &[u8], supplied: &[u8]) -> bool {
     difference == 0
 }
 
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+fn read_trusted_tokens(path: &Path) -> Result<HashSet<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents
+            .lines()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Err(error) => Err(format!(
+            "failed to read trusted browsers {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn append_trusted_token(path: &Path, token: &str) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| {
+        format!(
+            "failed to open trusted browsers {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| {
+            format!(
+                "failed to secure trusted browsers {}: {error}",
+                path.display()
+            )
+        })?;
+    writeln!(file, "{token}")
+        .map_err(|error| format!("failed to save trusted browser {}: {error}", path.display()))
+}
+
+fn trust_cookie(headers: &HeaderMap) -> Option<&str> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
         .filter_map(|cookie| cookie.trim().split_once('='))
-        .find_map(|(name, value)| (name == SESSION_COOKIE).then_some(value))
+        .find_map(|(name, value)| (name == TRUST_COOKIE).then_some(value))
 }
 
 async fn not_found() -> impl IntoResponse {
@@ -805,11 +862,11 @@ fn project_label(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn session_headers(token: &str) -> HeaderMap {
+    fn trusted_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            format!("other=value; {SESSION_COOKIE}={token}")
+            format!("other=value; {TRUST_COOKIE}={token}")
                 .parse()
                 .unwrap(),
         );
@@ -850,8 +907,10 @@ mod tests {
     }
 
     #[test]
-    fn authenticates_passcode_and_expires_fixed_session() {
-        let auth = MobileAuth::from_passcode("123456", Duration::from_secs(300));
+    fn authenticates_passcode_and_remembers_browser_across_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let trusted_browsers_path = temp.path().join("trusted-browsers");
+        let auth = MobileAuth::from_passcode("123456", trusted_browsers_path.clone());
 
         assert!(matches!(
             auth.authenticate("654321").unwrap(),
@@ -861,19 +920,17 @@ mod tests {
         let Authentication::Authenticated(token) = auth.authenticate("123456").unwrap() else {
             panic!("expected successful authentication");
         };
-        let headers = session_headers(&token);
-        assert!(auth.session_remaining(&headers).is_some());
+        let headers = trusted_headers(&token);
+        assert!(auth.is_trusted(&headers));
 
-        auth.sessions
-            .lock()
-            .unwrap()
-            .insert(token, Instant::now() - Duration::from_secs(1));
-        assert!(auth.session_remaining(&headers).is_none());
+        let restarted_auth = MobileAuth::from_passcode("123456", trusted_browsers_path);
+        assert!(restarted_auth.is_trusted(&headers));
     }
 
     #[test]
     fn throttles_repeated_passcode_attempts() {
-        let auth = MobileAuth::from_passcode("123456", Duration::from_secs(300));
+        let temp = tempfile::tempdir().unwrap();
+        let auth = MobileAuth::from_passcode("123456", temp.path().join("trusted-browsers"));
 
         assert!(matches!(
             auth.authenticate("000000").unwrap(),
