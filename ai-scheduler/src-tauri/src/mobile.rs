@@ -476,9 +476,9 @@ fn read_mobile_passcode(path: &Path) -> Result<String, String> {
     let passcode = fs::read_to_string(path)
         .map_err(|error| format!("failed to read mobile passcode {}: {error}", path.display()))?;
     let passcode = passcode.trim();
-    if !(6..=12).contains(&passcode.len()) || !passcode.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !(4..=12).contains(&passcode.len()) || !passcode.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!(
-            "mobile passcode {} must contain 6-12 digits",
+            "mobile passcode {} must contain 4-12 digits",
             path.display()
         ));
     }
@@ -839,13 +839,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("passcode");
 
-        fs::write(&path, "123456\n").unwrap();
-        assert_eq!(read_mobile_passcode(&path).unwrap(), "123456");
+        fs::write(&path, "1234\n").unwrap();
+        assert_eq!(read_mobile_passcode(&path).unwrap(), "1234");
 
-        fs::write(&path, "12345").unwrap();
+        fs::write(&path, "123").unwrap();
         assert!(read_mobile_passcode(&path).is_err());
 
-        fs::write(&path, "12345a").unwrap();
+        fs::write(&path, "123a").unwrap();
         assert!(read_mobile_passcode(&path).is_err());
     }
 
