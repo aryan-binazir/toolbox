@@ -39,6 +39,7 @@ struct ActiveRun {
     run_id: String,
     pgid: Arc<Mutex<Option<i32>>>,
     cancel_reason: Arc<Mutex<Option<CancelReason>>>,
+    kill_deadline: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +128,7 @@ impl ProcessManager {
             run_id: run_id.clone(),
             pgid: Arc::new(Mutex::new(None)),
             cancel_reason: Arc::new(Mutex::new(None)),
+            kill_deadline: Arc::new(Mutex::new(None)),
         };
         let replaced = {
             let mut active_runs = self.active.lock().expect("active lock poisoned");
@@ -205,10 +207,7 @@ impl ProcessManager {
 
     pub fn cancel_all_and_wait(&self, reason: CancelReason, grace: Duration, max_wait: Duration) {
         for active in self.active_runs() {
-            *active.cancel_reason.lock().expect("cancel lock poisoned") = Some(reason.clone());
-            if let Some(pgid) = *active.pgid.lock().expect("pgid lock poisoned") {
-                terminate_process_group(pgid);
-            }
+            request_cancel(&active, reason.clone());
         }
 
         let grace_deadline = Instant::now() + grace;
@@ -258,7 +257,16 @@ impl ProcessManager {
         );
         let stream_cap = settings.stream_cap_bytes as usize;
         let started_at = Utc::now();
-        let _ = store.mark_running(&active.run_id, started_at);
+        if let Err(error) = store.mark_running(&active.run_id, started_at) {
+            eprintln!(
+                "AI Scheduler could not mark run {} as running: {error}",
+                active.run_id
+            );
+            if let Some(routine_id) = routine.id.as_deref() {
+                self.remove_active(routine_id, &active.run_id);
+            }
+            return;
+        }
 
         let mut command = Command::new(&runner.command);
         command.args(&argv).current_dir(&routine.cwd);
@@ -287,7 +295,7 @@ impl ProcessManager {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
-                let _ = store.finish_run(
+                if let Err(store_error) = store.finish_run(
                     &active.run_id,
                     FinishRun {
                         status: RunStatus::Failed,
@@ -300,7 +308,12 @@ impl ProcessManager {
                         stdout_truncated: false,
                         stderr_truncated: false,
                     },
-                );
+                ) {
+                    eprintln!(
+                        "AI Scheduler could not record spawn failure for run {}: {store_error}",
+                        active.run_id
+                    );
+                }
                 if let Some(routine_id) = routine.id.as_deref() {
                     self.remove_active(routine_id, &active.run_id);
                 }
@@ -316,24 +329,30 @@ impl ProcessManager {
             .expect("cancel lock poisoned")
             .is_some()
         {
-            terminate_process_group(pgid);
-            thread::spawn(move || wait_then_kill(pgid, Duration::from_secs(5)));
+            begin_termination(&active, pgid, Duration::from_secs(5));
         }
 
+        let persistence_error = Arc::new(Mutex::new(None::<String>));
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdout_store = store.clone();
         let stdout_run_id = active.run_id.clone();
+        let stdout_persistence_error = persistence_error.clone();
         let stdout_reader = thread::spawn(move || {
             read_capped(stdout, stream_cap, |text, truncated| {
-                let _ = stdout_store.update_stdout(&stdout_run_id, text, truncated);
+                if let Err(error) = stdout_store.update_stdout(&stdout_run_id, text, truncated) {
+                    record_first_error(&stdout_persistence_error, error.to_string());
+                }
             })
         });
         let stderr_store = store.clone();
         let stderr_run_id = active.run_id.clone();
+        let stderr_persistence_error = persistence_error.clone();
         let stderr_reader = thread::spawn(move || {
             read_capped(stderr, stream_cap, |text, truncated| {
-                let _ = stderr_store.update_stderr(&stderr_run_id, text, truncated);
+                if let Err(error) = stderr_store.update_stderr(&stderr_run_id, text, truncated) {
+                    record_first_error(&stderr_persistence_error, error.to_string());
+                }
             })
         });
 
@@ -341,14 +360,31 @@ impl ProcessManager {
         let exit_status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
-                Ok(None) if start.elapsed() >= timeout => {
+                Ok(None)
+                    if start.elapsed() >= timeout
+                        && active
+                            .cancel_reason
+                            .lock()
+                            .expect("cancel lock poisoned")
+                            .is_none() =>
+                {
                     *active.cancel_reason.lock().expect("cancel lock poisoned") =
                         Some(CancelReason::Timeout);
-                    terminate_process_group(pgid);
-                    wait_then_kill(pgid, Duration::from_secs(5));
+                    begin_termination(&active, pgid, Duration::from_secs(5));
                 }
-                Ok(None) => thread::sleep(Duration::from_millis(200)),
-                Err(_) => break None,
+                Ok(None) => {
+                    maybe_kill_after_grace(&active, pgid);
+                    thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) => {
+                    record_first_error(
+                        &persistence_error,
+                        format!("failed to poll child process: {error}"),
+                    );
+                    kill_process_group(pgid);
+                    let _ = child.kill();
+                    break None;
+                }
             }
         };
 
@@ -358,12 +394,35 @@ impl ProcessManager {
             exit_status
         };
 
-        let (stdout, stdout_truncated) = stdout_reader
-            .join()
-            .unwrap_or_else(|_| ("".to_string(), false));
-        let (stderr, stderr_truncated) = stderr_reader
-            .join()
-            .unwrap_or_else(|_| ("".to_string(), false));
+        let (stdout, stdout_truncated, stdout_error) = stdout_reader.join().unwrap_or_else(|_| {
+            (
+                "".to_string(),
+                false,
+                Some("stdout reader panicked".to_string()),
+            )
+        });
+        let (mut stderr, stderr_truncated, stderr_error) =
+            stderr_reader.join().unwrap_or_else(|_| {
+                (
+                    "".to_string(),
+                    false,
+                    Some("stderr reader panicked".to_string()),
+                )
+            });
+        for error in [stdout_error, stderr_error].into_iter().flatten() {
+            record_first_error(&persistence_error, error);
+        }
+        let process_error = persistence_error
+            .lock()
+            .expect("persistence error lock poisoned")
+            .clone();
+        if let Some(error) = &process_error {
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str("AI Scheduler internal error: ");
+            stderr.push_str(error);
+        }
         let cancel_reason = active
             .cancel_reason
             .lock()
@@ -374,13 +433,14 @@ impl ProcessManager {
             Some(CancelReason::Timeout) => RunStatus::TimedOut,
             Some(CancelReason::Superseded) => RunStatus::Superseded,
             Some(CancelReason::User | CancelReason::AppClosed) => RunStatus::Cancelled,
+            None if process_error.is_some() => RunStatus::Failed,
             None => match final_status {
                 Some(status) if status.success() => RunStatus::Succeeded,
                 _ => RunStatus::Failed,
             },
         };
 
-        let _ = store.finish_run(
+        if let Err(error) = store.finish_run(
             &active.run_id,
             FinishRun {
                 status,
@@ -396,8 +456,15 @@ impl ProcessManager {
                 stdout_truncated,
                 stderr_truncated,
             },
-        );
-        let _ = store.prune(settings.max_runs_per_routine, settings.max_run_age_days);
+        ) {
+            eprintln!(
+                "AI Scheduler could not finish run {}: {error}",
+                active.run_id
+            );
+        }
+        if let Err(error) = store.prune(settings.max_runs_per_routine, settings.max_run_age_days) {
+            eprintln!("AI Scheduler could not prune run history: {error}");
+        }
 
         if let Some(routine_id) = routine.id.as_deref() {
             self.remove_active(routine_id, &active.run_id);
@@ -468,9 +535,9 @@ fn read_capped(
     reader: Option<impl Read>,
     cap: usize,
     mut on_update: impl FnMut(&str, bool),
-) -> (String, bool) {
+) -> (String, bool, Option<String>) {
     let Some(mut reader) = reader else {
-        return (String::new(), false);
+        return (String::new(), false, None);
     };
     let mut output = Vec::new();
     let mut truncated = false;
@@ -508,17 +575,52 @@ fn read_capped(
                     last_update_at = Some(now);
                 }
             }
-            Err(_) => break,
+            Err(error) => {
+                return (
+                    String::from_utf8_lossy(&output).to_string(),
+                    truncated,
+                    Some(format!("failed to read process output: {error}")),
+                );
+            }
         }
     }
-    (String::from_utf8_lossy(&output).to_string(), truncated)
+    (
+        String::from_utf8_lossy(&output).to_string(),
+        truncated,
+        None,
+    )
+}
+
+fn record_first_error(target: &Mutex<Option<String>>, error: String) {
+    let mut current = target.lock().expect("persistence error lock poisoned");
+    if current.is_none() {
+        *current = Some(error);
+    }
 }
 
 fn request_cancel(active: &ActiveRun, reason: CancelReason) {
     *active.cancel_reason.lock().expect("cancel lock poisoned") = Some(reason);
     if let Some(pgid) = *active.pgid.lock().expect("pgid lock poisoned") {
-        terminate_process_group(pgid);
-        thread::spawn(move || wait_then_kill(pgid, Duration::from_secs(5)));
+        begin_termination(active, pgid, Duration::from_secs(5));
+    }
+}
+
+fn begin_termination(active: &ActiveRun, pgid: i32, grace: Duration) {
+    terminate_process_group(pgid);
+    *active
+        .kill_deadline
+        .lock()
+        .expect("kill deadline lock poisoned") = Some(Instant::now() + grace);
+}
+
+fn maybe_kill_after_grace(active: &ActiveRun, pgid: i32) {
+    let mut deadline = active
+        .kill_deadline
+        .lock()
+        .expect("kill deadline lock poisoned");
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        kill_process_group(pgid);
+        *deadline = None;
     }
 }
 
@@ -527,11 +629,6 @@ fn terminate_process_group(pgid: i32) {
     unsafe {
         libc::kill(-pgid, libc::SIGTERM);
     }
-}
-
-fn wait_then_kill(pgid: i32, grace: Duration) {
-    thread::sleep(grace);
-    kill_process_group(pgid);
 }
 
 fn kill_process_group(pgid: i32) {
@@ -558,15 +655,12 @@ fn resolve_ssh_auth_sock() -> Option<PathBuf> {
     }
 
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
-    for candidate in [
+    [
         runtime_dir.join("ssh-agent.socket"),
         runtime_dir.join("keyring/ssh"),
-    ] {
-        if is_usable_ssh_sock(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| is_usable_ssh_sock(candidate))
 }
 
 fn is_usable_ssh_sock(path: &Path) -> bool {
@@ -882,11 +976,13 @@ mod tests {
             run_id: "run_old".to_string(),
             pgid: Arc::new(Mutex::new(None)),
             cancel_reason: Arc::new(Mutex::new(None)),
+            kill_deadline: Arc::new(Mutex::new(None)),
         };
         let new = ActiveRun {
             run_id: "run_new".to_string(),
             pgid: Arc::new(Mutex::new(None)),
             cancel_reason: Arc::new(Mutex::new(None)),
+            kill_deadline: Arc::new(Mutex::new(None)),
         };
         manager
             .active

@@ -13,8 +13,11 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
 ## Storage
 
 - Config path: `$XDG_CONFIG_HOME/ai-scheduler/config.toml`, fallback `~/.config/ai-scheduler/config.toml`.
+- Mobile passcode path: `$XDG_CONFIG_HOME/ai-scheduler/mobile-passcode`, fallback `~/.config/ai-scheduler/mobile-passcode`.
 - Run history path: `$XDG_DATA_HOME/ai-scheduler/runs.db`, fallback `~/.local/share/ai-scheduler/runs.db`.
+- Trusted mobile browser path: `$XDG_STATE_HOME/ai-scheduler/mobile-trusted-browsers`, fallback `~/.local/state/ai-scheduler/mobile-trusted-browsers`.
 - Config stores settings, runners, and routines.
+- Config writes are serialized and atomic, retain at most 20 timestamped backups, and use private file permissions.
 - Settings include a disabled-by-default mobile web server flag and port.
 - SQLite stores runs, stdout, stderr, exit state, cancel reasons, missed runs, and pruning metadata.
 - Default retention keeps the last 25 runs per routine and prunes runs older than 90 days.
@@ -31,6 +34,8 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
   pause/resume, manual runs, cancellation, run history, and runner status
   refresh.
 - Missed scheduled occurrences are stored as missed runs and are never run late.
+- Startup reconciliation records at most the latest 100 missed occurrences per routine.
+- Scheduler checkpoints advance only after each occurrence is successfully dispatched or recorded, so transient failures are retried without duplicate scheduled rows.
 - Schedules use cron strings plus IANA timezones.
 - Pausing a routine prevents future scheduled execution but does not cancel an active run.
 - Paused routines can still be run manually.
@@ -44,6 +49,7 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
 - The app assumes runner CLIs are already installed and authenticated.
 - The app does not manage credentials and does not store environment variables.
 - Runner availability, version, model options, effort options, and dangerous-mode support are probed in parallel.
+- Probe timeouts and nonzero exits report the runner unavailable instead of hanging or silently reporting success.
 - Codex and Claude expose separate effort controls.
 - Cursor uses a model dropdown; v1 defaults to `composer-2.5` and `composer-2.5-fast`.
 - Dangerous mode is a simple per-routine toggle, default off.
@@ -59,6 +65,7 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
 - Default timeout is 30 minutes.
 - Timeout and cancel terminate the child process and spawned descendants.
 - Cancellation first sends graceful termination, then hard kill if needed.
+- The process-monitor owner performs delayed hard kills, preventing detached cleanup work from targeting a later reused process group.
 - No sleep inhibitor in v1.
 
 ## Editing
@@ -67,6 +74,7 @@ AI Scheduler is an Arch-first local desktop app for scheduling AI CLI routines w
 - Raw TOML editing is available in an in-app panel.
 - Raw TOML can be invalid while editing, but save requires parse and schema validation.
 - New routines get random app-generated IDs.
+- Concurrent UI and mobile mutations are serialized so one config save cannot overwrite another completed mutation.
 - Form saves write canonical TOML and do not preserve comments or hand formatting.
 - Removing a routine from raw TOML does not delete its run history.
 - Deleting a routine through the UI deletes the routine and its run history after confirmation.

@@ -107,6 +107,7 @@ type Snapshot = {
   runner_capabilities: RunnerCapability[];
   scheduler_last_checked?: string | null;
   routine_schedules: RoutineScheduleInfo[];
+  mobile_server_error?: string | null;
 };
 
 type State = {
@@ -127,6 +128,8 @@ type State = {
   error?: string;
   errorTimer?: number;
   busy: boolean;
+  snapshotSequence: number;
+  runsSequence: number;
 };
 
 type RenderOptions = {
@@ -161,6 +164,8 @@ const state: State = {
   schedulePreviewSeq: 0,
   openRunIds: new Set(),
   busy: false,
+  snapshotSequence: 0,
+  runsSequence: 0,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -185,18 +190,21 @@ const TIME_OPTIONS = buildTimeOptions();
 const ACTIVE_RUN_STATUSES: RunStatus[] = ["queued", "running"];
 
 async function loadSnapshot(keepSelection = true, renderOptions: RenderOptions = {}, clearExistingError = true) {
+  const sequence = ++state.snapshotSequence;
   if (clearExistingError) clearError();
   try {
-    state.snapshot = await invoke<Snapshot>("get_snapshot");
+    const snapshot = await invoke<Snapshot>("get_snapshot");
+    if (sequence !== state.snapshotSequence) return;
+    state.snapshot = snapshot;
     const routines = state.snapshot.config.routines;
     if (!keepSelection || !state.selectedRoutineId || !routines.some((r) => r.id === state.selectedRoutineId)) {
       state.selectedRoutineId = routines[0]?.id ?? undefined;
     }
     await loadRuns();
   } catch (error) {
-    setError(error);
+    if (sequence === state.snapshotSequence) setError(error);
   }
-  render(renderOptions);
+  if (sequence === state.snapshotSequence) render(renderOptions);
 }
 
 function clearError() {
@@ -218,11 +226,16 @@ function setError(error: unknown) {
 }
 
 async function loadRuns() {
-  if (!state.selectedRoutineId) {
+  const routineId = state.selectedRoutineId;
+  const sequence = ++state.runsSequence;
+  if (!routineId) {
     state.runs = [];
     return;
   }
-  state.runs = await invoke<RunRecord[]>("list_runs", { routineId: state.selectedRoutineId });
+  const runs = await invoke<RunRecord[]>("list_runs", { routineId });
+  if (sequence === state.runsSequence && state.selectedRoutineId === routineId) {
+    state.runs = runs;
+  }
 }
 
 function selectedRoutine(): RoutineConfig | undefined {
@@ -360,6 +373,7 @@ function render(options: RenderOptions = {}) {
         </section>
       </aside>
       <section class="detail">
+        ${snapshot.mobile_server_error ? `<div class="banner">Mobile web unavailable: ${escapeHtml(snapshot.mobile_server_error)}</div>` : ""}
         ${state.error ? `<div class="banner">${escapeHtml(state.error)}</div>` : ""}
         ${renderDetailContent(routine, runner, capability)}
       </section>
@@ -856,8 +870,13 @@ function wireEvents() {
       state.selectedRoutineId = row.dataset.routineId;
       state.mode = "details";
       state.openRunIds.clear();
-      await loadRuns();
-      render();
+      try {
+        await loadRuns();
+        render();
+      } catch (error) {
+        setError(error);
+        render({ preserveScroll: true });
+      }
     });
   });
 
@@ -944,6 +963,17 @@ function ensureAtLeastOneScheduleDay(form: HTMLFormElement, fallback?: HTMLInput
 
 async function handleAction(action: string, element: HTMLElement) {
   const routine = selectedRoutine();
+  const guarded = [
+    "toggle-pause",
+    "toggle-selected-pause",
+    "run",
+    "cancel-run",
+    "delete-routine",
+    "save-raw",
+    "refresh-runners",
+  ].includes(action);
+  if (guarded && state.busy) return;
+  if (guarded) state.busy = true;
   try {
     if (action === "new-routine") {
       state.formDraft = newRoutine();
@@ -1031,10 +1061,14 @@ async function handleAction(action: string, element: HTMLElement) {
   } catch (error) {
     setError(error);
     render({ preserveScroll: true });
+  } finally {
+    if (guarded) state.busy = false;
   }
 }
 
 async function saveRoutineFromForm(form: HTMLFormElement) {
+  if (state.busy) return;
+  state.busy = true;
   const routine = routineFromForm(form);
   state.formDraft = routine;
   const existingIds = new Set((state.snapshot?.config.routines ?? []).map((item) => item.id).filter(Boolean));
@@ -1052,6 +1086,8 @@ async function saveRoutineFromForm(form: HTMLFormElement) {
   } catch (error) {
     setError(error);
     render({ preserveScroll: true });
+  } finally {
+    state.busy = false;
   }
 }
 

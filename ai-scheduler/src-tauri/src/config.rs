@@ -1,4 +1,8 @@
 use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -14,6 +18,11 @@ const DEFAULT_MAX_RUN_AGE_DAYS: u32 = 90;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 1_800;
 const DEFAULT_STREAM_CAP_BYTES: u64 = 5 * 1024 * 1024;
 const DEFAULT_MOBILE_WEB_PORT: u16 = 6882;
+const MAX_RUNS_PER_ROUTINE: u32 = 10_000;
+const MAX_RUN_AGE_DAYS: u32 = 3_650;
+const MAX_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+const MAX_STREAM_CAP_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_CONFIG_BACKUPS: usize = 20;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -238,7 +247,32 @@ pub fn save_config_text(path: impl AsRef<Path>, text: &str) -> Result<(), Config
         })?;
     }
     backup_existing_config(path)?;
-    fs::write(path, text).map_err(|source| ConfigError::Write {
+    atomic_write(path, text.as_bytes())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let temp_path = parent.join(format!(".{file_name}.tmp-{}", nanoid!(12)));
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temp_path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result.map_err(|source| ConfigError::Write {
         path: path.to_path_buf(),
         source,
     })
@@ -310,10 +344,19 @@ fn backup_existing_config(path: &Path) -> Result<(), ConfigError> {
         path: backup_path,
         source,
     })?;
+    let backups = backup_files_for(path);
+    for stale in backups
+        .iter()
+        .take(backups.len().saturating_sub(MAX_CONFIG_BACKUPS))
+    {
+        fs::remove_file(stale).map_err(|source| ConfigError::Write {
+            path: stale.clone(),
+            source,
+        })?;
+    }
     Ok(())
 }
 
-#[cfg(test)]
 fn backup_files_for(path: &Path) -> Vec<PathBuf> {
     let Some(parent) = path.parent() else {
         return vec![];
@@ -342,14 +385,34 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
     if config.settings.max_runs_per_routine == 0 {
         return validation("settings.max_runs_per_routine must be greater than 0");
     }
+    if config.settings.max_runs_per_routine > MAX_RUNS_PER_ROUTINE {
+        return validation(format!(
+            "settings.max_runs_per_routine must not exceed {MAX_RUNS_PER_ROUTINE}"
+        ));
+    }
     if config.settings.max_run_age_days == 0 {
         return validation("settings.max_run_age_days must be greater than 0");
+    }
+    if config.settings.max_run_age_days > MAX_RUN_AGE_DAYS {
+        return validation(format!(
+            "settings.max_run_age_days must not exceed {MAX_RUN_AGE_DAYS}"
+        ));
     }
     if config.settings.default_timeout_seconds == 0 {
         return validation("settings.default_timeout_seconds must be greater than 0");
     }
+    if config.settings.default_timeout_seconds > MAX_TIMEOUT_SECONDS {
+        return validation(format!(
+            "settings.default_timeout_seconds must not exceed {MAX_TIMEOUT_SECONDS}"
+        ));
+    }
     if config.settings.stream_cap_bytes == 0 {
         return validation("settings.stream_cap_bytes must be greater than 0");
+    }
+    if config.settings.stream_cap_bytes > MAX_STREAM_CAP_BYTES {
+        return validation(format!(
+            "settings.stream_cap_bytes must not exceed {MAX_STREAM_CAP_BYTES}"
+        ));
     }
     if config.settings.mobile_web_port == 0 {
         return validation("settings.mobile_web_port must be greater than 0");
@@ -371,10 +434,10 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
         }
         if runner
             .default_timeout_seconds
-            .is_some_and(|timeout| timeout == 0)
+            .is_some_and(|timeout| timeout == 0 || timeout > MAX_TIMEOUT_SECONDS)
         {
             return validation(format!(
-                "runner `{}` default_timeout_seconds must be greater than 0",
+                "runner `{}` default_timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}",
                 runner.id
             ));
         }
@@ -431,9 +494,12 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
                 .unwrap_or(config.settings.timezone.as_str()),
         )
         .map_err(|err| ConfigError::Validation(format!("routine `{id}` {err}")))?;
-        if routine.timeout_seconds.is_some_and(|timeout| timeout == 0) {
+        if routine
+            .timeout_seconds
+            .is_some_and(|timeout| timeout == 0 || timeout > MAX_TIMEOUT_SECONDS)
+        {
             return validation(format!(
-                "routine `{}` timeout_seconds must be greater than 0",
+                "routine `{}` timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}",
                 id
             ));
         }
@@ -827,15 +893,59 @@ schedule = "0 9 * * *"
 
     #[test]
     fn save_config_text_creates_backup_before_overwrite() {
+        use std::io::Read;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(&path, "old").unwrap();
+        let mut reader_opened_before_save = fs::File::open(&path).unwrap();
 
         save_config_text(&path, "new").unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let mut original_contents = String::new();
+        reader_opened_before_save
+            .read_to_string(&mut original_contents)
+            .unwrap();
+        assert_eq!(original_contents, "old");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         let backups = backup_files_for(&path);
         assert_eq!(backups.len(), 1);
         assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "old");
+    }
+
+    #[test]
+    fn rejects_resource_limits_that_could_exhaust_the_app() {
+        let mut config = builtin_default_config();
+        config.settings.stream_cap_bytes = 101 * 1024 * 1024;
+        assert!(validate_config(&config).is_err());
+
+        config.settings.stream_cap_bytes = DEFAULT_STREAM_CAP_BYTES;
+        config.settings.default_timeout_seconds = 8 * 24 * 60 * 60;
+        assert!(validate_config(&config).is_err());
+
+        config.settings.default_timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+        config.settings.max_runs_per_routine = 10_001;
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn config_backups_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "initial").unwrap();
+
+        for index in 0..25 {
+            save_config_text(&path, &format!("version {index}")).unwrap();
+        }
+
+        assert_eq!(backup_files_for(&path).len(), 20);
     }
 }

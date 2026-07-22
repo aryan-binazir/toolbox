@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -10,12 +10,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path as RoutePath, Request, State};
-use axum::http::{header, HeaderMap, HeaderName, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use crate::config::{OptionValue, RoutineConfig, RunnerKind};
@@ -30,11 +31,11 @@ const MOBILE_JS: &str = include_str!("../mobile/mobile.js");
 const MOBILE_VIEW_JS: &str = include_str!("../mobile/mobile-view.js");
 const MOBILE_LOGIN_JS: &str = include_str!("../mobile/mobile-login.js");
 const LOGIN_HTML: &str = include_str!("../mobile/login.html");
-const ASSET_VERSION: &str = "20260719-mobile-web-trusted-browser";
+const ASSET_VERSION: &str = "20260721-runtime-hardening";
 const MUTATION_HEADER: &str = "x-ai-scheduler-mobile";
 const MUTATION_HEADER_VALUE: &str = "1";
 const TRUST_COOKIE: &str = "ai_scheduler_mobile_trust";
-const TRUST_COOKIE_MAX_AGE_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
+const TRUST_COOKIE_MAX_AGE_SECONDS: u64 = 365 * 24 * 60 * 60;
 const OUTPUT_PREVIEW_BYTES: usize = 6 * 1024;
 const RUN_HISTORY_LIMIT: usize = 20;
 
@@ -74,7 +75,7 @@ struct MobileServerState {
 struct MobileAuth {
     passcode: PasscodeSource,
     trusted_browsers_path: PathBuf,
-    trusted_tokens: Mutex<HashSet<String>>,
+    trusted_tokens: Mutex<HashMap<String, i64>>,
     throttle: Mutex<AuthThrottle>,
 }
 
@@ -102,10 +103,13 @@ impl MobileAuth {
     fn from_file(passcode_path: PathBuf, trusted_browsers_path: PathBuf) -> Result<Self, String> {
         read_mobile_passcode(&passcode_path)?;
         let trusted_tokens = read_trusted_tokens(&trusted_browsers_path)?;
+        if trusted_tokens.needs_rewrite {
+            write_trusted_tokens(&trusted_browsers_path, &trusted_tokens.values)?;
+        }
         Ok(Self {
             passcode: PasscodeSource::File(passcode_path),
             trusted_browsers_path,
-            trusted_tokens: Mutex::new(trusted_tokens),
+            trusted_tokens: Mutex::new(trusted_tokens.values),
             throttle: Mutex::new(AuthThrottle::default()),
         })
     }
@@ -113,10 +117,13 @@ impl MobileAuth {
     #[cfg(test)]
     fn from_passcode(passcode: &str, trusted_browsers_path: PathBuf) -> Self {
         let trusted_tokens = read_trusted_tokens(&trusted_browsers_path).unwrap();
+        if trusted_tokens.needs_rewrite {
+            write_trusted_tokens(&trusted_browsers_path, &trusted_tokens.values).unwrap();
+        }
         Self {
             passcode: PasscodeSource::Fixed(passcode.to_string()),
             trusted_browsers_path,
-            trusted_tokens: Mutex::new(trusted_tokens),
+            trusted_tokens: Mutex::new(trusted_tokens.values),
             throttle: Mutex::new(AuthThrottle::default()),
         }
     }
@@ -159,10 +166,12 @@ impl MobileAuth {
         let Some(token) = trust_cookie(headers) else {
             return false;
         };
+        let token_hash = trusted_token_hash(token);
         self.trusted_tokens
             .lock()
             .expect("mobile auth lock poisoned")
-            .contains(token)
+            .get(&token_hash)
+            .is_some_and(|expires_at| *expires_at > Utc::now().timestamp())
     }
 
     fn trust_browser(&self, token: &str) -> Result<(), String> {
@@ -170,9 +179,32 @@ impl MobileAuth {
             .trusted_tokens
             .lock()
             .expect("mobile auth lock poisoned");
-        append_trusted_token(&self.trusted_browsers_path, token)?;
-        trusted_tokens.insert(token.to_string());
+        let token_hash = trusted_token_hash(token);
+        let expires_at = Utc::now().timestamp() + TRUST_COOKIE_MAX_AGE_SECONDS as i64;
+        append_trusted_token(&self.trusted_browsers_path, &token_hash, expires_at)?;
+        trusted_tokens.insert(token_hash, expires_at);
         Ok(())
+    }
+
+    fn forget_browser(&self, headers: &HeaderMap) -> Result<(), String> {
+        let Some(token) = trust_cookie(headers) else {
+            return Ok(());
+        };
+        let mut trusted_tokens = self
+            .trusted_tokens
+            .lock()
+            .expect("mobile auth lock poisoned");
+        trusted_tokens.remove(&trusted_token_hash(token));
+        write_trusted_tokens(&self.trusted_browsers_path, &trusted_tokens)
+    }
+
+    fn revoke_all_browsers(&self) -> Result<(), String> {
+        let mut trusted_tokens = self
+            .trusted_tokens
+            .lock()
+            .expect("mobile auth lock poisoned");
+        trusted_tokens.clear();
+        write_trusted_tokens(&self.trusted_browsers_path, &trusted_tokens)
     }
 }
 
@@ -265,6 +297,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -306,14 +345,30 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn start_mobile_server(app: AppState, port: u16) -> Result<MobileServerHandle, String> {
+pub fn start_mobile_server(
+    app: AppState,
+    port: u16,
+    passcode_path: PathBuf,
+    trusted_browsers_path: PathBuf,
+) -> Result<MobileServerHandle, String> {
     #[cfg(not(test))]
-    let auth = MobileAuth::from_file(mobile_passcode_path(), trusted_browsers_path())?;
+    let auth = MobileAuth::from_file(passcode_path, trusted_browsers_path)?;
     #[cfg(test)]
-    let auth = MobileAuth::from_passcode(
-        "000000",
-        std::env::temp_dir().join("ai-scheduler-unused-test-trusted-browsers"),
-    );
+    let auth = {
+        let _ = passcode_path;
+        MobileAuth::from_passcode("000000", trusted_browsers_path)
+    };
+
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let listener = std::net::TcpListener::bind(address)
+        .map_err(|error| format!("failed to bind mobile web server to {address}: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure mobile web server on {address}: {error}"))?;
+    let bound_port = listener
+        .local_addr()
+        .map_err(|error| format!("failed to read mobile web listener address: {error}"))?
+        .port();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     thread::spawn(move || {
@@ -328,13 +383,13 @@ pub fn start_mobile_server(app: AppState, port: u16) -> Result<MobileServerHandl
             }
         };
 
-        if let Err(error) = runtime.block_on(serve(app, auth, port, shutdown_rx)) {
+        if let Err(error) = runtime.block_on(serve(app, auth, listener, shutdown_rx)) {
             eprintln!("AI Scheduler mobile server stopped: {error}");
         }
     });
 
     Ok(MobileServerHandle {
-        port,
+        port: bound_port,
         shutdown: Some(shutdown_tx),
     })
 }
@@ -342,7 +397,7 @@ pub fn start_mobile_server(app: AppState, port: u16) -> Result<MobileServerHandl
 async fn serve(
     app: AppState,
     auth: MobileAuth,
-    port: u16,
+    listener: std::net::TcpListener,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), std::io::Error> {
     let state = MobileServerState {
@@ -361,6 +416,11 @@ async fn serve(
             post(api_delete_routine),
         )
         .route("/api/runners/refresh", post(api_refresh_runners))
+        .route("/api/logout", post(api_logout))
+        .route(
+            "/api/trusted-browsers/revoke-all",
+            post(api_revoke_all_browsers),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_mobile_auth,
@@ -374,9 +434,10 @@ async fn serve(
         .route("/api/unlock", post(api_unlock))
         .merge(protected_api)
         .fallback(not_found)
-        .with_state(state);
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let listener = tokio::net::TcpListener::bind(address).await?;
+        .with_state(state)
+        .layer(middleware::from_fn(add_security_headers));
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let address = listener.local_addr()?;
     eprintln!("AI Scheduler mobile web listening on http://{address}");
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
@@ -433,6 +494,7 @@ async fn require_mobile_auth(
 
 async fn api_unlock(
     State(state): State<MobileServerState>,
+    headers: HeaderMap,
     Json(request): Json<UnlockRequest>,
 ) -> Result<Response, ApiError> {
     let authentication = state
@@ -455,8 +517,13 @@ async fn api_unlock(
             });
         }
     };
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"));
     let cookie = format!(
-        "{TRUST_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={TRUST_COOKIE_MAX_AGE_SECONDS}"
+        "{TRUST_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={TRUST_COOKIE_MAX_AGE_SECONDS}{}",
+        if secure { "; Secure" } else { "" }
     );
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -470,24 +537,6 @@ async fn api_unlock(
 
 fn login_html() -> String {
     LOGIN_HTML.replace("__MOBILE_ASSET_VERSION__", ASSET_VERSION)
-}
-
-#[cfg(not(test))]
-fn mobile_passcode_path() -> PathBuf {
-    repository_path(".mobile-passcode")
-}
-
-#[cfg(not(test))]
-fn trusted_browsers_path() -> PathBuf {
-    repository_path(".mobile-trusted-browsers")
-}
-
-#[cfg(not(test))]
-fn repository_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("Cargo manifest directory must have a repository parent")
-        .join(name)
 }
 
 fn read_mobile_passcode(path: &Path) -> Result<String, String> {
@@ -515,15 +564,52 @@ fn constant_time_eq(expected: &[u8], supplied: &[u8]) -> bool {
     difference == 0
 }
 
-fn read_trusted_tokens(path: &Path) -> Result<HashSet<String>, String> {
+struct TrustedTokens {
+    values: HashMap<String, i64>,
+    needs_rewrite: bool,
+}
+
+fn read_trusted_tokens(path: &Path) -> Result<TrustedTokens, String> {
     match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents
-            .lines()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .map(str::to_string)
-            .collect()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Ok(contents) => {
+            let now = Utc::now().timestamp();
+            let default_expiry = now + TRUST_COOKIE_MAX_AGE_SECONDS as i64;
+            let mut values = HashMap::new();
+            let mut needs_rewrite = false;
+            for line in contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+            {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                match fields.as_slice() {
+                    [hash, expires_at]
+                        if hash.len() == 64
+                            && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                    {
+                        match expires_at.parse::<i64>() {
+                            Ok(expires_at) if expires_at > now => {
+                                values.insert((*hash).to_string(), expires_at);
+                            }
+                            _ => needs_rewrite = true,
+                        }
+                    }
+                    [legacy_token] => {
+                        values.insert(trusted_token_hash(legacy_token), default_expiry);
+                        needs_rewrite = true;
+                    }
+                    _ => needs_rewrite = true,
+                }
+            }
+            Ok(TrustedTokens {
+                values,
+                needs_rewrite,
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(TrustedTokens {
+            values: HashMap::new(),
+            needs_rewrite: false,
+        }),
         Err(error) => Err(format!(
             "failed to read trusted browsers {}: {error}",
             path.display()
@@ -531,7 +617,15 @@ fn read_trusted_tokens(path: &Path) -> Result<HashSet<String>, String> {
     }
 }
 
-fn append_trusted_token(path: &Path, token: &str) -> Result<(), String> {
+fn append_trusted_token(path: &Path, token_hash: &str, expires_at: i64) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create trusted browser directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -550,8 +644,57 @@ fn append_trusted_token(path: &Path, token: &str) -> Result<(), String> {
                 path.display()
             )
         })?;
-    writeln!(file, "{token}")
+    writeln!(file, "{token_hash} {expires_at}")
         .map_err(|error| format!("failed to save trusted browser {}: {error}", path.display()))
+}
+
+fn write_trusted_tokens(path: &Path, tokens: &HashMap<String, i64>) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create trusted browser directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| {
+        format!(
+            "failed to rewrite trusted browsers {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| {
+            format!(
+                "failed to secure trusted browsers {}: {error}",
+                path.display()
+            )
+        })?;
+    let mut entries = tokens.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    for (token_hash, expires_at) in entries {
+        writeln!(file, "{token_hash} {expires_at}").map_err(|error| {
+            format!(
+                "failed to rewrite trusted browsers {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    file.sync_all().map_err(|error| {
+        format!(
+            "failed to sync trusted browsers {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn trusted_token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
 fn trust_cookie(headers: &HeaderMap) -> Option<&str> {
@@ -566,6 +709,31 @@ fn trust_cookie(headers: &HeaderMap) -> Option<&str> {
 
 async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "not found")
+}
+
+async fn add_security_headers(request: Request, next: middleware::Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        ),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
 }
 
 fn no_store_headers(content_type: &'static str) -> [(HeaderName, &'static str); 4] {
@@ -658,6 +826,41 @@ async fn api_refresh_runners(
     verify_mutation_request(&headers)?;
     state.app.refresh_runner_capabilities();
     Ok(Json(mobile_snapshot(&state.app)?))
+}
+
+async fn api_logout(
+    State(state): State<MobileServerState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    verify_mutation_request(&headers)?;
+    state
+        .auth
+        .forget_browser(&headers)
+        .map_err(ApiError::internal)?;
+    Ok(clear_trust_cookie_response())
+}
+
+async fn api_revoke_all_browsers(
+    State(state): State<MobileServerState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    verify_mutation_request(&headers)?;
+    state
+        .auth
+        .revoke_all_browsers()
+        .map_err(ApiError::internal)?;
+    Ok(clear_trust_cookie_response())
+}
+
+fn clear_trust_cookie_response() -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!("{TRUST_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+            .parse()
+            .expect("cleared trust cookie must be a valid header"),
+    );
+    response
 }
 
 fn verify_mutation_request(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -922,9 +1125,14 @@ mod tests {
         };
         let headers = trusted_headers(&token);
         assert!(auth.is_trusted(&headers));
+        let stored = fs::read_to_string(&trusted_browsers_path).unwrap();
+        assert!(!stored.contains(&token));
+        assert_eq!(stored.split_whitespace().count(), 2);
 
         let restarted_auth = MobileAuth::from_passcode("123456", trusted_browsers_path);
         assert!(restarted_auth.is_trusted(&headers));
+        restarted_auth.forget_browser(&headers).unwrap();
+        assert!(!restarted_auth.is_trusted(&headers));
     }
 
     #[test]

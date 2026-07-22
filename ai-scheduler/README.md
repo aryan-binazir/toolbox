@@ -22,9 +22,12 @@ make bootstrap-config
 ## Storage
 
 - Config: `$XDG_CONFIG_HOME/ai-scheduler/config.toml`, fallback `~/.config/ai-scheduler/config.toml`
+- Mobile passcode: `$XDG_CONFIG_HOME/ai-scheduler/mobile-passcode`, fallback `~/.config/ai-scheduler/mobile-passcode`
 - Runs DB: `$XDG_DATA_HOME/ai-scheduler/runs.db`, fallback `~/.local/share/ai-scheduler/runs.db`
+- Trusted mobile browsers: `$XDG_STATE_HOME/ai-scheduler/mobile-trusted-browsers`, fallback `~/.local/state/ai-scheduler/mobile-trusted-browsers`
 
 Run history is stored in SQLite and pruned by config. Defaults keep the last 25 runs per routine and remove terminal runs older than 90 days. Active `queued` and `running` rows are not pruned.
+Config saves are serialized and atomic, with at most 20 timestamped backups kept beside the config file.
 
 ## Config Model
 
@@ -51,15 +54,20 @@ mobile_web_port = 6882
 
 When enabled, the desktop app binds a mobile web UI/API to
 `http://127.0.0.1:6882` while the app is open. When disabled, no HTTP listener
-is started. HTTP access requires the numeric passcode stored in the gitignored
-`.mobile-passcode` file at the repository root. The file must contain 4-12
-digits. A successful unlock permanently trusts that browser using a random
-cookie backed by the private, gitignored `.mobile-trusted-browsers` file. Clear
-the browser's site data, or remove its token from that file and restart the app,
-to revoke trust.
-Passcode-file changes apply to the next unlock without rebuilding or restarting
-the app. Keep both files private with mode `600`. Incorrect unlock attempts are
-progressively throttled. The mobile surface can view, create, edit, pause,
+is started. HTTP access requires the 4-12 digit passcode stored in the mobile
+passcode file listed above. A successful unlock trusts that browser for one
+year using a random, HTTP-only cookie. Only a SHA-256 token hash and expiry are
+stored in the private trusted-browser file. Trust can be revoked for the current
+browser or every browser from the mobile UI.
+
+On the first upgraded launch, legacy repository-root `.mobile-passcode` and
+`.mobile-trusted-browsers` files are copied to their XDG locations when the new
+files do not exist. Legacy raw trust tokens are converted to hashed, expiring
+records. Passcode-file changes apply to the next unlock without rebuilding or
+restarting the app. Keep both files private with mode `600`. Incorrect unlock
+attempts are progressively throttled. The server adds restrictive browser
+security headers and rejects state-changing API calls without the expected
+same-origin mutation header. The mobile surface can view, create, edit, pause,
 resume, delete, run, and cancel routines, and can refresh runner status checks.
 
 External config-file edits are applied on the next app launch. In-app raw config
@@ -68,6 +76,8 @@ saves reconcile the mobile server immediately.
 ## Runtime Behavior
 
 - Routines run only while the app is open.
+- On startup, at most the latest 100 missed occurrences per routine are recorded; older gaps are skipped to keep reconciliation bounded.
+- A failed scheduled dispatch or missed-run write is retried because the scheduler checkpoint advances only after successful handling.
 - Paused routines do not run on schedule but can still be run manually.
 - If a scheduled run overlaps an older active run for the same routine, the older run is cancelled as superseded and the newer run starts.
 - Closing the app cancels active runs.

@@ -140,6 +140,13 @@ function renderListPage(state) {
       ${renderRoutineSection("Current", current)}
       ${renderRoutineSection("Paused", paused)}
       ${renderRunnerPanel(state.snapshot.runners || [])}
+      <section class="runner-panel">
+        <div class="section-head"><h2>Browser trust</h2></div>
+        <div class="actions">
+          <button data-action="logout" ${state.busy ? "disabled" : ""}>Forget this browser</button>
+          <button class="danger" data-action="revoke-all-browsers" ${state.busy ? "disabled" : ""}>Revoke all browsers</button>
+        </div>
+      </section>
     </main>
   `;
 }
@@ -221,7 +228,14 @@ function renderRunnerStatus(runner) {
 }
 
 function newRoutineId() {
-  return `rtn_mobile_${Date.now().toString(36)}`;
+  if (globalThis.crypto?.randomUUID) {
+    return `rtn_mobile_${globalThis.crypto.randomUUID().replaceAll("-", "")}`;
+  }
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+    return `rtn_mobile_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+  return `rtn_mobile_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
 function renderDetailPage(state) {

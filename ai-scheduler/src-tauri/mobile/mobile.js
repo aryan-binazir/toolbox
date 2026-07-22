@@ -20,6 +20,8 @@ const state = {
   draft: null,
   busy: false,
   error: "",
+  snapshotSequence: 0,
+  runsSequence: 0,
 };
 
 const mutationHeaders = {
@@ -59,6 +61,17 @@ app.addEventListener("click", async (event) => {
   const action = button.dataset.action;
   const id = button.dataset.id;
   const routine = id ? routineById(id) : selectedRoutine();
+  const guarded = [
+    "refresh",
+    "pause",
+    "run",
+    "cancel",
+    "delete-routine",
+    "logout",
+    "revoke-all-browsers",
+  ].includes(action);
+  if (guarded && state.busy) return;
+  if (guarded) setBusy(true);
 
   try {
     if (action === "select" && id) {
@@ -111,9 +124,18 @@ app.addEventListener("click", async (event) => {
       state.runs = [];
       state.runsFor = null;
       await loadSnapshot(false);
+    } else if (action === "logout") {
+      await mutate("/api/logout");
+      window.location.reload();
+    } else if (action === "revoke-all-browsers") {
+      if (!confirm("Revoke access for every remembered browser?")) return;
+      await mutate("/api/trusted-browsers/revoke-all");
+      window.location.reload();
     }
   } catch (error) {
-    setError(error);
+    if (sequence === state.snapshotSequence) setError(error);
+  } finally {
+    if (guarded) setBusy(false);
   }
 });
 
@@ -155,6 +177,8 @@ app.addEventListener("submit", async (event) => {
   const form = event.target.closest("#routine-form");
   if (!form) return;
   event.preventDefault();
+  if (state.busy) return;
+  setBusy(true);
   try {
     const routine = routineFromForm(form, currentSchedule());
     await mutate("/api/routines", routine);
@@ -164,14 +188,18 @@ app.addEventListener("submit", async (event) => {
     await loadSnapshot(true);
     await loadRuns(routine.id, true);
   } catch (error) {
-    setError(error);
+    if (sequence === state.runsSequence && state.selectedId === routineId) setError(error);
+  } finally {
+    setBusy(false);
   }
 });
 
 async function loadSnapshot(preserveSelection = true, quiet = false) {
+  const sequence = ++state.snapshotSequence;
   if (!quiet) setBusy(true);
   try {
     const snapshot = await requestJson("/api/snapshot");
+    if (sequence !== state.snapshotSequence) return;
     state.snapshot = snapshot;
     const routines = snapshot.routines || [];
     if (state.selectedId && !routines.some((routine) => routine.id === state.selectedId)) {
@@ -194,15 +222,17 @@ async function loadSnapshot(preserveSelection = true, quiet = false) {
   } catch (error) {
     setError(error);
   } finally {
-    if (!quiet) setBusy(false);
+    if (!quiet && sequence === state.snapshotSequence) setBusy(false);
   }
 }
 
 async function loadRuns(routineId, quiet = false) {
   if (!routineId) return;
+  const sequence = ++state.runsSequence;
   if (!quiet) setBusy(true);
   try {
     const result = await requestJson(`/api/routines/${encodeURIComponent(routineId)}/runs`);
+    if (sequence !== state.runsSequence || state.selectedId !== routineId) return;
     state.runs = result.runs || [];
     state.runsFor = routineId;
     state.error = "";
@@ -210,7 +240,7 @@ async function loadRuns(routineId, quiet = false) {
   } catch (error) {
     setError(error);
   } finally {
-    if (!quiet) setBusy(false);
+    if (!quiet && sequence === state.runsSequence) setBusy(false);
   }
 }
 
@@ -235,6 +265,7 @@ async function requestJson(path, options = {}) {
     }
     throw new Error(message);
   }
+  if (response.status === 204) return null;
   return response.json();
 }
 

@@ -7,6 +7,8 @@ pub mod scheduler;
 pub mod store;
 
 use std::fs;
+#[cfg(not(test))]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,8 +16,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use config::{
-    builtin_default_config, canonical_toml, load_config, load_raw_config_preserving_text,
-    normalize_config, save_config, save_config_text, AppConfig, RoutineConfig,
+    builtin_default_config, load_config, load_raw_config_preserving_text, normalize_config,
+    save_config, save_config_text, AppConfig, RoutineConfig,
 };
 use paths::AppPaths;
 use runners::{configured_runner_capabilities, probe_runners, RunnerCapability};
@@ -52,9 +54,11 @@ pub struct AppState {
     paths: AppPaths,
     store: Arc<RunStore>,
     config: Arc<Mutex<AppConfig>>,
+    config_update: Arc<Mutex<()>>,
     runner_capabilities: Arc<Mutex<Vec<RunnerCapability>>>,
     process_manager: process::ProcessManager,
     mobile_server: Arc<Mutex<Option<mobile::MobileServerHandle>>>,
+    mobile_server_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,10 +69,13 @@ pub struct AppSnapshot {
     pub runner_capabilities: Vec<RunnerCapability>,
     pub scheduler_last_checked: Option<DateTime<Utc>>,
     pub routine_schedules: Vec<RoutineScheduleInfo>,
+    pub mobile_server_error: Option<String>,
 }
 
 impl AppState {
     pub fn bootstrap(paths: AppPaths) -> Result<Self, AppError> {
+        #[cfg(not(test))]
+        migrate_legacy_mobile_auth_files(&paths)?;
         ensure_config_exists(&paths.config_file)?;
         let loaded = load_config(&paths.config_file)?;
         if loaded.changed {
@@ -85,9 +92,11 @@ impl AppState {
             paths,
             store,
             config: Arc::new(Mutex::new(loaded.config)),
+            config_update: Arc::new(Mutex::new(())),
             runner_capabilities: Arc::new(Mutex::new(runner_capabilities)),
             process_manager: process::ProcessManager::default(),
             mobile_server: Arc::new(Mutex::new(None)),
+            mobile_server_error: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -96,6 +105,14 @@ impl AppState {
     }
 
     pub fn replace_config(&self, config: AppConfig) -> Result<(), AppError> {
+        let _update = self
+            .config_update
+            .lock()
+            .expect("config update lock poisoned");
+        self.persist_config(config)
+    }
+
+    fn persist_config(&self, config: AppConfig) -> Result<(), AppError> {
         save_config(&self.paths.config_file, &config)?;
         self.set_config(config);
         Ok(())
@@ -137,6 +154,11 @@ impl AppState {
             runner_capabilities: self.runner_capabilities(),
             scheduler_last_checked,
             routine_schedules,
+            mobile_server_error: self
+                .mobile_server_error
+                .lock()
+                .expect("mobile error lock poisoned")
+                .clone(),
         })
     }
 
@@ -145,6 +167,10 @@ impl AppState {
     }
 
     pub fn save_raw_config(&self, raw: String) -> Result<AppConfig, AppError> {
+        let _update = self
+            .config_update
+            .lock()
+            .expect("config update lock poisoned");
         let config = load_raw_config_preserving_text(&raw)?;
         save_config_text(&self.paths.config_file, &raw)?;
         self.set_config(config.clone());
@@ -162,6 +188,10 @@ impl AppState {
     }
 
     pub fn save_routine(&self, routine: RoutineConfig) -> Result<AppConfig, AppError> {
+        let _update = self
+            .config_update
+            .lock()
+            .expect("config update lock poisoned");
         let mut config = self.config();
         let incoming = routine;
         let incoming_id = incoming.id.clone();
@@ -179,7 +209,7 @@ impl AppState {
             config.routines.push(incoming);
         }
         normalize_config(&mut config);
-        self.replace_config(config.clone())?;
+        self.persist_config(config.clone())?;
         Ok(config)
     }
 
@@ -188,6 +218,10 @@ impl AppState {
         routine_id: &str,
         paused: bool,
     ) -> Result<AppConfig, AppError> {
+        let _update = self
+            .config_update
+            .lock()
+            .expect("config update lock poisoned");
         let mut config = self.config();
         let routine = config
             .routines
@@ -195,11 +229,15 @@ impl AppState {
             .find(|routine| routine.id.as_deref() == Some(routine_id))
             .ok_or_else(|| AppError::Message(format!("routine `{routine_id}` not found")))?;
         routine.paused = paused;
-        self.replace_config(config.clone())?;
+        self.persist_config(config.clone())?;
         Ok(config)
     }
 
     pub fn delete_routine(&self, routine_id: &str) -> Result<AppConfig, AppError> {
+        let _update = self
+            .config_update
+            .lock()
+            .expect("config update lock poisoned");
         let mut config = self.config();
         let existed = config
             .routines
@@ -208,7 +246,7 @@ impl AppState {
         config
             .routines
             .retain(|routine| routine.id.as_deref() != Some(routine_id));
-        self.replace_config(config.clone())?;
+        self.persist_config(config.clone())?;
         if existed {
             self.process_manager()
                 .cancel_routine(routine_id, process::CancelReason::User);
@@ -249,6 +287,10 @@ impl AppState {
                 handle.stop();
                 eprintln!("AI Scheduler mobile web disabled");
             }
+            *self
+                .mobile_server_error
+                .lock()
+                .expect("mobile error lock poisoned") = None;
             return;
         }
 
@@ -262,9 +304,26 @@ impl AppState {
         if let Some(handle) = current.take() {
             handle.stop();
         }
-        match mobile::start_mobile_server(self.clone(), settings.mobile_web_port) {
-            Ok(handle) => *current = Some(handle),
-            Err(error) => eprintln!("AI Scheduler mobile web not started: {error}"),
+        match mobile::start_mobile_server(
+            self.clone(),
+            settings.mobile_web_port,
+            self.paths.mobile_passcode_file.clone(),
+            self.paths.trusted_browsers_file.clone(),
+        ) {
+            Ok(handle) => {
+                *current = Some(handle);
+                *self
+                    .mobile_server_error
+                    .lock()
+                    .expect("mobile error lock poisoned") = None;
+            }
+            Err(error) => {
+                eprintln!("AI Scheduler mobile web not started: {error}");
+                *self
+                    .mobile_server_error
+                    .lock()
+                    .expect("mobile error lock poisoned") = Some(error);
+            }
         }
     }
 
@@ -292,7 +351,42 @@ fn ensure_config_exists(path: &PathBuf) -> Result<(), AppError> {
         fs::create_dir_all(parent)?;
     }
     let config = builtin_default_config();
-    fs::write(path, canonical_toml(&config)?)?;
+    save_config(path, &config)?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn migrate_legacy_mobile_auth_files(paths: &AppPaths) -> Result<(), AppError> {
+    let Some(repository_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+    else {
+        return Ok(());
+    };
+    migrate_private_file(
+        &repository_root.join(".mobile-passcode"),
+        &paths.mobile_passcode_file,
+    )?;
+    migrate_private_file(
+        &repository_root.join(".mobile-trusted-browsers"),
+        &paths.trusted_browsers_file,
+    )
+}
+
+#[cfg(not(test))]
+fn migrate_private_file(source: &Path, target: &Path) -> Result<(), AppError> {
+    if target.exists() || !source.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -390,59 +484,20 @@ async fn cancel_routine(
     Ok(state.cancel_routine(&routine_id))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_paths(temp: &tempfile::TempDir) -> AppPaths {
-        AppPaths {
-            config_file: temp.path().join("config.toml"),
-            data_dir: temp.path().join("data"),
-            db_file: temp.path().join("runs.db"),
-            state_dir: temp.path().join("state"),
-        }
-    }
-
-    fn available_port() -> u16 {
-        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
-    #[test]
-    fn mobile_server_is_disabled_by_default() {
-        let temp = tempfile::tempdir().unwrap();
-        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
-
-        state.reconcile_mobile_server();
-
-        assert!(state.mobile_server.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn disabling_mobile_web_config_clears_server_handle() {
-        let temp = tempfile::tempdir().unwrap();
-        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
-        let mut config = state.config();
-        config.settings.mobile_web_enabled = true;
-        config.settings.mobile_web_port = available_port();
-        state.set_config(config);
-
-        assert!(state.mobile_server.lock().unwrap().is_some());
-
-        let mut config = state.config();
-        config.settings.mobile_web_enabled = false;
-        state.set_config(config);
-
-        assert!(state.mobile_server.lock().unwrap().is_none());
-    }
-}
-
 pub fn run() {
     let paths = AppPaths::discover();
-    let state = AppState::bootstrap(paths).expect("failed to bootstrap app state");
+    let state = match AppState::bootstrap(paths) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("AI Scheduler could not start: {error}");
+            let _ = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("AI Scheduler could not start")
+                .set_description(error.to_string())
+                .show();
+            return;
+        }
+    };
     state.reconcile_mobile_server();
     let setup_state = state.clone();
     let close_process_manager = state.process_manager();
@@ -484,4 +539,120 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths(temp: &tempfile::TempDir) -> AppPaths {
+        AppPaths {
+            config_file: temp.path().join("config.toml"),
+            data_dir: temp.path().join("data"),
+            db_file: temp.path().join("runs.db"),
+            state_dir: temp.path().join("state"),
+            mobile_passcode_file: temp.path().join("mobile-passcode"),
+            trusted_browsers_file: temp.path().join("trusted-browsers"),
+        }
+    }
+
+    fn available_port() -> u16 {
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn mobile_server_is_disabled_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+
+        state.reconcile_mobile_server();
+
+        assert!(state.mobile_server.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn disabling_mobile_web_config_clears_server_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+        let mut config = state.config();
+        config.settings.mobile_web_enabled = true;
+        config.settings.mobile_web_port = available_port();
+        state.set_config(config);
+
+        assert!(state.mobile_server.lock().unwrap().is_some());
+
+        let mut config = state.config();
+        config.settings.mobile_web_enabled = false;
+        state.set_config(config);
+
+        assert!(state.mobile_server.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn occupied_mobile_port_is_reported_instead_of_kept_as_a_running_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+        let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut config = state.config();
+        config.settings.mobile_web_enabled = true;
+        config.settings.mobile_web_port = occupied.local_addr().unwrap().port();
+
+        state.set_config(config);
+
+        assert!(state.mobile_server.lock().unwrap().is_none());
+        assert!(state
+            .mobile_server_error
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|error| error.contains("address") || error.contains("use")));
+    }
+
+    #[test]
+    fn concurrent_routine_mutations_do_not_overwrite_each_other() {
+        use std::sync::Barrier;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+        let mut config = state.config();
+        let large_description = "x".repeat(2 * 1024 * 1024);
+        for id in ["rtn_a", "rtn_b"] {
+            config.routines.push(RoutineConfig {
+                id: Some(id.to_string()),
+                title: id.to_string(),
+                description: large_description.clone(),
+                prompt: "true".to_string(),
+                runner: "script".to_string(),
+                model: None,
+                effort: None,
+                cwd: temp.path().to_path_buf(),
+                schedule: "0 7 * * *".to_string(),
+                timezone: Some("UTC".to_string()),
+                paused: false,
+                dangerous: false,
+                timeout_seconds: Some(5),
+            });
+        }
+        state.replace_config(config).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = ["rtn_a", "rtn_b"].map(|routine_id| {
+            let state = state.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                state.set_routine_paused(routine_id, true).unwrap();
+            })
+        });
+
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(state.config().routines.iter().all(|routine| routine.paused));
+    }
 }

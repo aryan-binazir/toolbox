@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -41,12 +42,24 @@ pub fn probe_runners(runners: &[RunnerConfig]) -> Vec<RunnerCapability> {
     let handles = runners
         .iter()
         .cloned()
-        .map(|runner| thread::spawn(move || probe_runner(&runner)))
+        .map(|runner| {
+            let probe_runner_config = runner.clone();
+            (
+                runner,
+                thread::spawn(move || probe_runner(&probe_runner_config)),
+            )
+        })
         .collect::<Vec<_>>();
 
     handles
         .into_iter()
-        .filter_map(|handle| handle.join().ok())
+        .map(|(runner, handle)| match handle.join() {
+            Ok(capability) => capability,
+            Err(_) => RunnerCapability {
+                error: Some("runner probe panicked".to_string()),
+                ..configured_runner_capabilities(&[runner]).remove(0)
+            },
+        })
         .collect()
 }
 
@@ -180,28 +193,69 @@ fn run_command(command: &str, args: &[&str], timeout: Duration) -> Result<String
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| err.to_string())?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "probe stdout pipe was unavailable".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "probe stderr pipe was unavailable".to_string())?;
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).map(|_| output)
+    });
 
     let start = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                let output = child.wait_with_output().map_err(|err| err.to_string())?;
-                let mut text = String::new();
-                text.push_str(&String::from_utf8_lossy(&output.stdout));
-                if text.trim().is_empty() {
-                    text.push_str(&String::from_utf8_lossy(&output.stderr));
-                }
-                return Ok(text);
-            }
+            Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(format!("probe timed out after {}s", timeout.as_secs()));
             }
             Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(err) => return Err(err.to_string()),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(err.to_string());
+            }
         }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "probe stdout reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "probe stderr reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    let mut text = String::from_utf8_lossy(&stdout).to_string();
+    if text.trim().is_empty() {
+        text = String::from_utf8_lossy(&stderr).to_string();
     }
+    if !status.success() {
+        let status = status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        let detail = text.trim();
+        return Err(if detail.is_empty() {
+            format!("probe exited with status {status}")
+        } else {
+            format!("probe exited with status {status}: {detail}")
+        });
+    }
+    Ok(text)
 }
 
 fn first_line(value: &str) -> Option<String> {
@@ -234,6 +288,40 @@ fn resolve_command_path(command: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn nonzero_version_probe_is_not_reported_as_available() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let command = temp.path().join("broken-runner");
+        fs::write(&command, "#!/bin/sh\necho broken >&2\nexit 2\n").unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        let runner = RunnerConfig {
+            id: "broken".to_string(),
+            label: "Broken".to_string(),
+            command: command.display().to_string(),
+            kind: RunnerKind::Custom,
+            args: vec![],
+            dangerous_flag: None,
+            default_model: None,
+            default_effort: None,
+            model_options: vec![],
+            effort_options: vec![],
+            stdin: crate::config::StdinMode::Null,
+            default_timeout_seconds: None,
+        };
+
+        let capability = probe_runner(&runner);
+
+        assert!(!capability.available);
+        assert!(capability
+            .error
+            .as_deref()
+            .is_some_and(|error| { error.contains("status 2") && error.contains("broken") }));
+    }
 
     #[test]
     fn parses_cursor_model_output() {

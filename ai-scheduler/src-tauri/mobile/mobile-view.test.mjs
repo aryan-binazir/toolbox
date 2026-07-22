@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderMobileApp } from "./mobile-view.js";
+import { newRoutine, renderMobileApp } from "./mobile-view.js";
 
 const snapshot = {
   timezone: "America/New_York",
@@ -76,6 +76,8 @@ test("mobile list page is the desktop sidebar promoted to the whole screen", () 
   assert.match(html, />Current</);
   assert.match(html, />Paused</);
   assert.match(html, />Runners</);
+  assert.match(html, /data-action="logout"/);
+  assert.match(html, /data-action="revoke-all-browsers"/);
   assert.match(html, /Current routine/);
   assert.match(html, /ai-scheduler - Codex/);
   assert.match(html, /data-action="pause" data-id="rtn_current"/);
@@ -84,6 +86,16 @@ test("mobile list page is the desktop sidebar promoted to the whole screen", () 
   assert.match(html, /Paused routine/);
   assert.doesNotMatch(html, /class="layout"/);
   assert.doesNotMatch(html, /side-panel/);
+});
+
+test("new mobile routines receive collision-resistant ids", () => {
+  const originalNow = Date.now;
+  Date.now = () => 1_000;
+  try {
+    assert.notEqual(newRoutine(snapshot).id, newRoutine(snapshot).id);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("mobile routine detail is a full-screen page with back navigation and inline runs", () => {

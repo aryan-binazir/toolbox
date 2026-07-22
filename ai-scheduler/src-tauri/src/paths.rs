@@ -7,6 +7,8 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub db_file: PathBuf,
     pub state_dir: PathBuf,
+    pub mobile_passcode_file: PathBuf,
+    pub trusted_browsers_file: PathBuf,
 }
 
 impl AppPaths {
@@ -32,6 +34,8 @@ impl AppPaths {
             config_file: config_dir.join("config.toml"),
             db_file: data_dir.join("runs.db"),
             data_dir,
+            mobile_passcode_file: config_dir.join("mobile-passcode"),
+            trusted_browsers_file: state_dir.join("mobile-trusted-browsers"),
             state_dir,
         }
     }
@@ -60,6 +64,15 @@ mod tests {
         );
         assert_eq!(paths.db_file, temp.path().join("data/ai-scheduler/runs.db"));
         assert_eq!(paths.state_dir, temp.path().join("state/ai-scheduler"));
+        assert_eq!(
+            paths.mobile_passcode_file,
+            temp.path().join("config/ai-scheduler/mobile-passcode")
+        );
+        assert_eq!(
+            paths.trusted_browsers_file,
+            temp.path()
+                .join("state/ai-scheduler/mobile-trusted-browsers")
+        );
 
         env::remove_var("XDG_CONFIG_HOME");
         env::remove_var("XDG_DATA_HOME");

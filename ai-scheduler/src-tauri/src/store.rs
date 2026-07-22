@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
+use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -18,6 +19,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("timestamp parse error: {0}")]
     Time(#[from] chrono::ParseError),
+    #[error("run `{0}` was not found")]
+    RunNotFound(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,17 +50,24 @@ impl RunStatus {
         }
     }
 
-    fn from_str(value: &str) -> Self {
+    fn from_str(value: &str) -> rusqlite::Result<Self> {
         match value {
-            "queued" => Self::Queued,
-            "running" => Self::Running,
-            "succeeded" => Self::Succeeded,
-            "failed" => Self::Failed,
-            "cancelled" => Self::Cancelled,
-            "timed_out" => Self::TimedOut,
-            "missed" => Self::Missed,
-            "superseded" => Self::Superseded,
-            _ => Self::Failed,
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "timed_out" => Ok(Self::TimedOut),
+            "missed" => Ok(Self::Missed),
+            "superseded" => Ok(Self::Superseded),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown run status `{value}`"),
+                )),
+            )),
         }
     }
 }
@@ -211,22 +221,23 @@ impl RunStore {
             ],
         )?;
         drop(conn);
-        self.get_run(&id)
-            .map(|record| record.expect("inserted run missing"))
+        self.get_run(&id)?
+            .ok_or_else(|| StoreError::RunNotFound(id))
     }
 
     pub fn mark_running(&self, run_id: &str, started_at: DateTime<Utc>) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3",
             params![RunStatus::Running.as_str(), fmt_time(started_at), run_id],
         )?;
+        ensure_run_changed(changed, run_id)?;
         Ok(())
     }
 
     pub fn finish_run(&self, run_id: &str, finish: FinishRun) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        conn.execute(
+        let changed = conn.execute(
             r#"
             UPDATE runs
             SET status = ?1,
@@ -253,6 +264,7 @@ impl RunStore {
                 run_id,
             ],
         )?;
+        ensure_run_changed(changed, run_id)?;
         Ok(())
     }
 
@@ -279,10 +291,11 @@ impl RunStore {
         truncated: bool,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE runs SET stdout = ?1, stdout_truncated = ?2 WHERE id = ?3",
             params![stdout, truncated as i64, run_id],
         )?;
+        ensure_run_changed(changed, run_id)?;
         Ok(())
     }
 
@@ -293,10 +306,11 @@ impl RunStore {
         truncated: bool,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE runs SET stderr = ?1, stderr_truncated = ?2 WHERE id = ?3",
             params![stderr, truncated as i64, run_id],
         )?;
+        ensure_run_changed(changed, run_id)?;
         Ok(())
     }
 
@@ -317,6 +331,20 @@ impl RunStore {
             conn.prepare("SELECT * FROM runs WHERE routine_id = ?1 ORDER BY created_at DESC")?;
         let rows = stmt.query_map(params![routine_id], read_run)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn scheduled_run_exists(
+        &self,
+        routine_id: &str,
+        scheduled_for: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE routine_id = ?1 AND scheduled_for = ?2)",
+            params![routine_id, fmt_time(scheduled_for)],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(exists)
     }
 
     pub fn delete_runs_for_routine(&self, routine_id: &str) -> Result<(), StoreError> {
@@ -396,6 +424,14 @@ impl RunStore {
     }
 }
 
+fn ensure_run_changed(changed: usize, run_id: &str) -> Result<(), StoreError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StoreError::RunNotFound(run_id.to_string()))
+    }
+}
+
 fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     let command_json: String = row.get("command_json")?;
     let command = serde_json::from_str(&command_json).unwrap_or_default();
@@ -403,7 +439,7 @@ fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
         id: row.get("id")?,
         routine_id: row.get("routine_id")?,
         routine_title: row.get("routine_title")?,
-        status: RunStatus::from_str(row.get::<_, String>("status")?.as_str()),
+        status: RunStatus::from_str(row.get::<_, String>("status")?.as_str())?,
         scheduled_for: parse_opt(row.get("scheduled_for")?),
         started_at: parse_opt(row.get("started_at")?),
         finished_at: parse_opt(row.get("finished_at")?),
@@ -552,5 +588,77 @@ mod tests {
         assert_eq!(run.status, RunStatus::Cancelled);
         assert_eq!(run.cancel_reason.as_deref(), Some("app_restarted"));
         assert!(run.finished_at.is_some());
+    }
+
+    #[test]
+    fn run_updates_reject_unknown_run_ids() {
+        let store = RunStore::in_memory().unwrap();
+
+        assert!(store.mark_running("missing", Utc::now()).is_err());
+        assert!(store.update_stdout("missing", "output", false).is_err());
+        assert!(store.update_stderr("missing", "error", false).is_err());
+        assert!(store
+            .finish_run(
+                "missing",
+                FinishRun {
+                    status: RunStatus::Failed,
+                    finished_at: Utc::now(),
+                    exit_code: None,
+                    signal: None,
+                    cancel_reason: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn scheduled_run_lookup_is_scoped_to_routine_and_occurrence() {
+        let store = RunStore::in_memory().unwrap();
+        let scheduled_for = Utc::now();
+        store
+            .create_run(NewRun {
+                routine_id: "rtn_a".to_string(),
+                routine_title: "A".to_string(),
+                status: RunStatus::Missed,
+                scheduled_for: Some(scheduled_for),
+                command: vec![],
+                cwd: "/tmp".to_string(),
+                cancel_reason: Some("app_closed".to_string()),
+            })
+            .unwrap();
+
+        assert!(store.scheduled_run_exists("rtn_a", scheduled_for).unwrap());
+        assert!(!store.scheduled_run_exists("rtn_b", scheduled_for).unwrap());
+    }
+
+    #[test]
+    fn corrupted_run_status_is_reported_instead_of_relabelled_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runs.db");
+        let store = RunStore::open(&path).unwrap();
+        let run = store
+            .create_run(NewRun {
+                routine_id: "rtn_a".to_string(),
+                routine_title: "A".to_string(),
+                status: RunStatus::Succeeded,
+                scheduled_for: None,
+                command: vec![],
+                cwd: "/tmp".to_string(),
+                cancel_reason: None,
+            })
+            .unwrap();
+        let external = Connection::open(path).unwrap();
+        external
+            .execute(
+                "UPDATE runs SET status = 'corrupt' WHERE id = ?1",
+                params![run.id],
+            )
+            .unwrap();
+
+        assert!(store.list_runs_for_routine("rtn_a").is_err());
     }
 }

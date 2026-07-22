@@ -12,6 +12,7 @@ use crate::store::{NewRun, RunStatus};
 use crate::AppState;
 
 const FRESH_RUN_WINDOW: TimeDelta = TimeDelta::seconds(60);
+const MAX_MISSED_RUNS_PER_ROUTINE: usize = 100;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RoutineScheduleInfo {
@@ -28,11 +29,15 @@ pub struct SchedulePreview {
 
 pub fn start_scheduler(state: AppState, _app_handle: tauri::AppHandle) {
     thread::spawn(move || {
-        let _ = reconcile_missed_since_last_check(&state, Utc::now());
+        if let Err(error) = reconcile_missed_since_last_check(&state, Utc::now()) {
+            eprintln!("AI Scheduler missed-run reconciliation failed: {error}");
+        }
         loop {
             thread::sleep(Duration::from_secs(30));
             let now = Utc::now();
-            let _ = run_due_since_last_check(&state, now);
+            if let Err(error) = run_due_since_last_check(&state, now) {
+                eprintln!("AI Scheduler scheduling pass failed: {error}");
+            }
         }
     });
 }
@@ -55,22 +60,38 @@ pub fn reconcile_missed_since_last_check(
     let config = state.config();
     for routine in config.routines.iter().filter(|routine| !routine.paused) {
         let routine_id = routine.id.clone().unwrap_or_default();
-        for_each_due_occurrence(&config, routine, last_checked, now, |due| {
-            let _ = store.create_run(NewRun {
-                routine_id: routine_id.clone(),
-                routine_title: routine.title.clone(),
-                status: RunStatus::Missed,
-                scheduled_for: Some(due),
-                command: vec![],
-                cwd: routine.cwd.display().to_string(),
-                cancel_reason: Some("app_closed".to_string()),
-            });
-        });
+        for due in recent_due_occurrences(
+            &config,
+            routine,
+            last_checked,
+            now,
+            MAX_MISSED_RUNS_PER_ROUTINE,
+        ) {
+            if store
+                .scheduled_run_exists(&routine_id, due)
+                .map_err(|err| err.to_string())?
+            {
+                continue;
+            }
+            store
+                .create_run(NewRun {
+                    routine_id: routine_id.clone(),
+                    routine_title: routine.title.clone(),
+                    status: RunStatus::Missed,
+                    scheduled_for: Some(due),
+                    command: vec![],
+                    cwd: routine.cwd.display().to_string(),
+                    cancel_reason: Some("app_closed".to_string()),
+                })
+                .map_err(|err| err.to_string())?;
+        }
     }
-    let _ = store.prune(
-        config.settings.max_runs_per_routine,
-        config.settings.max_run_age_days,
-    );
+    store
+        .prune(
+            config.settings.max_runs_per_routine,
+            config.settings.max_run_age_days,
+        )
+        .map_err(|err| err.to_string())?;
     store
         .set_scheduler_last_checked(now)
         .map_err(|err| err.to_string())
@@ -94,35 +115,54 @@ pub fn run_due_since_last_check(state: &AppState, now: DateTime<Utc>) -> Result<
         };
         let mut fresh_due = Vec::new();
         let routine_id = routine.id.clone().unwrap_or_default();
-        for_each_due_occurrence(&config, routine, last_checked, now, |due| {
+        for due in recent_due_occurrences(
+            &config,
+            routine,
+            last_checked,
+            now,
+            MAX_MISSED_RUNS_PER_ROUTINE,
+        ) {
+            if store
+                .scheduled_run_exists(&routine_id, due)
+                .map_err(|err| err.to_string())?
+            {
+                continue;
+            }
             if now.signed_duration_since(due) <= FRESH_RUN_WINDOW {
                 fresh_due.push(due);
             } else {
-                let _ = store.create_run(NewRun {
-                    routine_id: routine_id.clone(),
-                    routine_title: routine.title.clone(),
-                    status: RunStatus::Missed,
-                    scheduled_for: Some(due),
-                    command: vec![],
-                    cwd: routine.cwd.display().to_string(),
-                    cancel_reason: Some("scheduler_late".to_string()),
-                });
+                store
+                    .create_run(NewRun {
+                        routine_id: routine_id.clone(),
+                        routine_title: routine.title.clone(),
+                        status: RunStatus::Missed,
+                        scheduled_for: Some(due),
+                        command: vec![],
+                        cwd: routine.cwd.display().to_string(),
+                        cancel_reason: Some("scheduler_late".to_string()),
+                    })
+                    .map_err(|err| err.to_string())?;
             }
-        });
+        }
         for due in fresh_due {
-            let _ = state.process_manager().start_run(
-                store.clone(),
-                config.settings.clone(),
-                runner.clone(),
-                routine.clone(),
-                Some(due),
-            );
+            state
+                .process_manager()
+                .start_run(
+                    store.clone(),
+                    config.settings.clone(),
+                    runner.clone(),
+                    routine.clone(),
+                    Some(due),
+                )
+                .map_err(|err| err.to_string())?;
         }
     }
-    let _ = store.prune(
-        config.settings.max_runs_per_routine,
-        config.settings.max_run_age_days,
-    );
+    store
+        .prune(
+            config.settings.max_runs_per_routine,
+            config.settings.max_run_age_days,
+        )
+        .map_err(|err| err.to_string())?;
 
     store
         .set_scheduler_last_checked(now)
@@ -159,6 +199,55 @@ pub fn due_occurrences(
         due.push(occurrence)
     });
     due
+}
+
+fn recent_due_occurrences(
+    config: &AppConfig,
+    routine: &RoutineConfig,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    limit: usize,
+) -> Vec<DateTime<Utc>> {
+    if since >= until || limit == 0 {
+        return vec![];
+    }
+    let timezone = routine
+        .timezone
+        .as_deref()
+        .unwrap_or(config.settings.timezone.as_str());
+    let Ok(tz) = timezone.parse::<Tz>() else {
+        return vec![];
+    };
+    let Ok(schedule) = CronSchedule::from_str(&normalize_cron(&routine.schedule)) else {
+        return vec![];
+    };
+
+    let collect = |start: DateTime<Utc>, cap: usize| {
+        schedule
+            .after(&start.with_timezone(&tz))
+            .map(|due| due.with_timezone(&Utc))
+            .take_while(|due| *due <= until)
+            .take(cap)
+            .collect::<Vec<_>>()
+    };
+    let due = collect(since, limit + 1);
+    if due.len() <= limit {
+        return due;
+    }
+
+    let mut lower = since.timestamp();
+    let mut upper = until.timestamp();
+    while lower < upper {
+        let midpoint = lower + (upper - lower) / 2;
+        let start = DateTime::<Utc>::from_timestamp(midpoint, 0).unwrap_or(since);
+        if collect(start, limit + 1).len() > limit {
+            lower = midpoint + 1;
+        } else {
+            upper = midpoint;
+        }
+    }
+    let start = DateTime::<Utc>::from_timestamp(upper, 0).unwrap_or(since);
+    collect(start, limit)
 }
 
 pub fn routine_schedule_infos(config: &AppConfig, now: DateTime<Utc>) -> Vec<RoutineScheduleInfo> {
@@ -253,6 +342,58 @@ mod tests {
 
     use super::*;
     use crate::config::{AppConfig, RoutineConfig, Settings};
+    use crate::paths::AppPaths;
+
+    fn test_paths(temp: &tempfile::TempDir) -> AppPaths {
+        AppPaths {
+            config_file: temp.path().join("config.toml"),
+            data_dir: temp.path().join("data"),
+            db_file: temp.path().join("runs.db"),
+            state_dir: temp.path().join("state"),
+            mobile_passcode_file: temp.path().join("mobile-passcode"),
+            trusted_browsers_file: temp.path().join("trusted-browsers"),
+        }
+    }
+
+    #[test]
+    fn startup_reconciliation_materializes_only_the_latest_hundred_missed_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(test_paths(&temp)).unwrap();
+        let mut config = state.config();
+        config.settings.max_runs_per_routine = 10_000;
+        config.settings.max_run_age_days = 3_650;
+        config.routines.push(RoutineConfig {
+            id: Some("rtn_frequent".to_string()),
+            title: "Frequent".to_string(),
+            description: String::new(),
+            prompt: "true".to_string(),
+            runner: "script".to_string(),
+            model: None,
+            effort: None,
+            cwd: temp.path().to_path_buf(),
+            schedule: "* * * * * *".to_string(),
+            timezone: Some("UTC".to_string()),
+            paused: false,
+            dangerous: false,
+            timeout_seconds: Some(5),
+        });
+        state.replace_config(config).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 21, 12, 0, 0).unwrap();
+        state
+            .store()
+            .set_scheduler_last_checked(now - TimeDelta::minutes(5))
+            .unwrap();
+
+        reconcile_missed_since_last_check(&state, now).unwrap();
+
+        let runs = state.list_runs("rtn_frequent").unwrap();
+        assert_eq!(runs.len(), 100);
+        assert_eq!(runs.first().unwrap().scheduled_for, Some(now));
+        assert_eq!(
+            runs.last().unwrap().scheduled_for,
+            Some(now - TimeDelta::seconds(99))
+        );
+    }
 
     #[test]
     fn finds_due_occurrences_with_timezone() {
